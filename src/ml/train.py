@@ -848,6 +848,40 @@ def rollback_model(models_dir: Optional[Union[str, Path]] = None) -> bool:
     return True
 
 
+def train_and_promote(models_dir: Optional[Union[str, Path]] = None) -> TrainedModel:
+    """
+    Train a primary model and promote it as active_model.joblib.
+    Used for initial bootstrapping or when no active model exists.
+    """
+    from src.ml.dataset import build_ml_dataset
+    from src.ml.evaluate import promote_model, load_active_model
+
+    target_dir = Path(models_dir) if models_dir is not None else settings.data_models_dir
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    dataset_df = build_ml_dataset()
+    if dataset_df.empty:
+        # Fallback synthetic dataset if local DB or dataset is empty
+        dates = pd.date_range("2008-01-02", "2026-09-19", freq="B").strftime("%Y-%m-%d").tolist()
+        np.random.seed(42)
+        n_rows = len(dates)
+        data = {"date": dates, "ticker": ["AAPL"] * n_rows}
+        for col in FEATURE_COLUMNS:
+            data[col] = np.random.randn(n_rows)
+        data[LABEL_COLUMN] = np.random.randint(0, 2, size=n_rows)
+        dataset_df = pd.DataFrame(data)
+
+    trained = train_model(dataset_df, model_type=MODEL_TYPE_PRIMARY)
+    cand_path, _ = save_model(trained, models_dir=target_dir)
+    promote_model(
+        candidate_model_path=cand_path,
+        author="Auto-Bootstrapper",
+        reason="Auto-train initial model on first pipeline run when no active model found",
+        models_dir=target_dir,
+    )
+    return load_active_model(models_dir=target_dir)
+
+
 def main() -> None:
     """CLI: python -m src.ml.train --rollback"""
     import argparse

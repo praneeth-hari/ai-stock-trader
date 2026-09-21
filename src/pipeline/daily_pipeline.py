@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 import threading
 from datetime import datetime, timezone
@@ -466,6 +467,15 @@ def _run_daily_pipeline_internal(
 
     # ── 4. Load Active Model & Rank ────────────────────────────────────────────
     try:
+        model_file = settings.data_models_dir / "active_model.joblib"
+        if not model_file.exists() and not os.path.exists("data/models/active_model.joblib"):
+            print("No model found - training new model...")
+            logger.info("No active model found at %s - training new model...", model_file)
+            from src.ml.train import train_and_promote
+            train_and_promote()
+            print("Model trained and promoted!")
+            logger.info("Model trained and promoted!")
+
         active_model = load_active_model()
         # Resolve effective feature decision date (latest completed trading day <= run_date)
         # e.g., On Monday morning 09:00 ET, data close is Friday T-1.
