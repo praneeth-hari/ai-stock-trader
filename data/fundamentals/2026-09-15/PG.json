@@ -1,0 +1,22 @@
+{
+  "ticker": "PG",
+  "fetch_date": "2026-09-15",
+  "trailing_pe": 22.182024,
+  "forward_pe": 19.844456,
+  "peg_ratio": 3.74,
+  "price_to_book": 6.3993115,
+  "enterprise_to_ebitda": 14.776,
+  "profit_margins": 0.18437,
+  "operating_margins": 0.22084999,
+  "return_on_equity": 0.30290002,
+  "return_on_assets": 0.107209995,
+  "revenue_growth": 0.015,
+  "earnings_growth": -0.155,
+  "debt_to_equity": 64.49,
+  "current_ratio": 0.677,
+  "free_cash_flow": 13280874496.0,
+  "operating_cash_flow": 19555999744.0,
+  "dividend_yield": 2.98,
+  "payout_ratio": 0.6433,
+  "market_cap": 341072838656.0
+}

@@ -1,0 +1,22 @@
+{
+  "ticker": "SLB",
+  "fetch_date": "2026-09-13",
+  "trailing_pe": 27.346342,
+  "forward_pe": 17.330551,
+  "peg_ratio": 1.48,
+  "price_to_book": 3.191029,
+  "enterprise_to_ebitda": 12.606,
+  "profit_margins": 0.08527,
+  "operating_margins": 0.12706,
+  "return_on_equity": 0.12909001,
+  "return_on_assets": 0.06172,
+  "revenue_growth": 0.05,
+  "earnings_growth": -0.297,
+  "debt_to_equity": 47.002,
+  "current_ratio": 1.439,
+  "free_cash_flow": 2955124992.0,
+  "operating_cash_flow": 6533000192.0,
+  "dividend_yield": 2.1,
+  "payout_ratio": 0.5659,
+  "market_cap": 83201073152.0
+}

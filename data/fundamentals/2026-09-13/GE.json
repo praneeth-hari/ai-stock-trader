@@ -1,0 +1,22 @@
+{
+  "ticker": "GE",
+  "fetch_date": "2026-09-13",
+  "trailing_pe": 38.167454,
+  "forward_pe": 35.598602,
+  "peg_ratio": 4.16,
+  "price_to_book": 19.037704,
+  "enterprise_to_ebitda": 30.16,
+  "profit_margins": 0.17716,
+  "operating_margins": 0.20571,
+  "return_on_equity": 0.48231998,
+  "return_on_assets": 0.05065,
+  "revenue_growth": 0.211,
+  "earnings_growth": 0.194,
+  "debt_to_equity": 113.225,
+  "current_ratio": 0.982,
+  "free_cash_flow": 6594625024.0,
+  "operating_cash_flow": 9799999488.0,
+  "dividend_yield": 0.58,
+  "payout_ratio": 0.1958,
+  "market_cap": 335817474048.0
+}

@@ -1,0 +1,22 @@
+{
+  "ticker": "V",
+  "fetch_date": "2026-09-13",
+  "trailing_pe": 31.554516,
+  "forward_pe": 24.68959,
+  "peg_ratio": 1.68,
+  "price_to_book": 19.631691,
+  "enterprise_to_ebitda": 22.238,
+  "profit_margins": 0.50782,
+  "operating_margins": 0.66130996,
+  "return_on_equity": 0.6119,
+  "return_on_assets": 0.1911,
+  "revenue_growth": 0.144,
+  "earnings_growth": 0.102,
+  "debt_to_equity": 67.821,
+  "current_ratio": 0.985,
+  "free_cash_flow": 20404000768.0,
+  "operating_cash_flow": 22580000768.0,
+  "dividend_yield": 0.72,
+  "payout_ratio": 0.22129999,
+  "market_cap": 691647676416.0
+}

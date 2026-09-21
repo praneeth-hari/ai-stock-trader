@@ -1,0 +1,22 @@
+{
+  "ticker": "MRK",
+  "fetch_date": "2026-09-14",
+  "trailing_pe": 115.144,
+  "forward_pe": 15.070352,
+  "peg_ratio": 2.63,
+  "price_to_book": 8.473448,
+  "enterprise_to_ebitda": 13.921,
+  "profit_margins": 0.047659997,
+  "operating_margins": -0.00241,
+  "return_on_equity": 0.06961,
+  "return_on_assets": 0.11868,
+  "revenue_growth": 0.051,
+  "earnings_growth": null,
+  "debt_to_equity": 128.408,
+  "current_ratio": 1.323,
+  "free_cash_flow": 15171500032.0,
+  "operating_cash_flow": 19967000576.0,
+  "dividend_yield": 2.36,
+  "payout_ratio": 2.688,
+  "market_cap": 355100000256.0
+}

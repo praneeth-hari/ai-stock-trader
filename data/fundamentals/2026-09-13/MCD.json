@@ -1,0 +1,22 @@
+{
+  "ticker": "MCD",
+  "fetch_date": "2026-09-13",
+  "trailing_pe": 20.530893,
+  "forward_pe": 18.0712,
+  "peg_ratio": 2.18,
+  "price_to_book": -174.6404,
+  "enterprise_to_ebitda": 15.572,
+  "profit_margins": 0.3172,
+  "operating_margins": 0.46485,
+  "return_on_equity": null,
+  "return_on_assets": 0.1325,
+  "revenue_growth": 0.037,
+  "earnings_growth": 0.057,
+  "debt_to_equity": null,
+  "current_ratio": 1.081,
+  "free_cash_flow": 6262374912.0,
+  "operating_cash_flow": 11347000320.0,
+  "dividend_yield": 2.95,
+  "payout_ratio": 0.5971,
+  "market_cap": 178700713984.0
+}

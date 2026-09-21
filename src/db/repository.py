@@ -1,0 +1,1227 @@
+"""
+src/db/repository.py — Single source-of-truth database access layer (Phase 2b).
+
+ARCHITECTURE RULE:
+Every other module in the system reads and writes through THIS file only.
+No raw SQL, no SQLAlchemy sessions, and no DB imports are allowed anywhere
+else in the codebase. This thin layer is the only place that knows about
+the database schema and connection.
+
+UPGRADE PATH:
+Defaults to SQLite (zero infrastructure, no server). Switching to PostgreSQL
+requires only changing settings.db_url — no code changes here.
+
+PUBLIC API SURFACE (one function per logical operation):
+
+  Engine / schema
+    get_engine()          → the SA engine singleton
+    create_all_tables()   → create tables if they don't exist
+
+  Market data (validated OHLCV only — never raw)
+    save_market_data(df)
+    get_market_data(ticker, start_date, end_date) → DataFrame
+
+  Features
+    save_features(df)               df must have columns: date, ticker, + feature cols
+    get_features(ticker, start, end) → DataFrame
+
+  Predictions
+    save_predictions(df)            df must have: date, ticker, probability[, model_version]
+    get_predictions(ticker, start, end) → DataFrame
+
+  Portfolio
+    save_portfolio_snapshot(run_date, cash, total_value, positions)
+    get_portfolio_snapshot(run_date) → dict | None
+    get_latest_portfolio_snapshot()  → dict | None
+
+  Orders
+    save_order(run_date, ticker, action, quantity, price, reason)
+    get_orders(run_date) → list[dict]
+
+  Trades
+    save_trade(run_date, ticker, action, quantity, fill_price, cost, net_pnl)
+    get_trades(run_date) → list[dict]
+
+  Event log
+    log_event(level, component, message, details)
+    get_events(level, limit) → list[dict]
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
+
+import pandas as pd
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
+
+from config.settings import settings
+from src.db.models import (
+    Base,
+    CorrelationMatrixRow,
+    EarningsCalendarRow,
+    EventLog,
+    FeatureImportanceRow,
+    FeatureRow,
+    MacroIndicatorRow,
+    MarketDataRow,
+    OrderRow,
+    PortfolioSnapshot,
+    PredictionRow,
+    SectorRankingRow,
+    SentimentScoreRow,
+    StrategySnapshotRow,
+    StrategyTradeRow,
+    StrategyVariantRow,
+    TradeRow,
+)
+
+logger = logging.getLogger(__name__)
+if not logger.handlers:
+    logging.basicConfig(
+        level=settings.log_level,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+
+# ── Safeguard: Prevent tests/demos from mutating production database ───────────
+
+def _assert_safe_write_target() -> None:
+    """
+    Safeguard ensuring tests, demos, or automation scripts can NEVER write
+    to the production database (trader.db) unless explicitly authorised.
+    """
+    if os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("PREVENT_PROD_DB_WRITE") == "1":
+        clean_url = str(settings.db_url).replace("\\", "/")
+        if "data/processed/trader.db" in clean_url and os.environ.get("ALLOW_PROD_TEST_WRITE") != "1":
+            raise RuntimeError(
+                f"PRODUCTION DATABASE WRITE BLOCKED: Execution context is a test or guarded demo "
+                f"({os.environ.get('PYTEST_CURRENT_TEST', 'PREVENT_PROD_DB_WRITE=1')}), but settings.db_url points "
+                f"to production database '{settings.db_url}'. Tests must patch settings.db_url to an isolated temporary database."
+            )
+
+# ── Engine singleton ───────────────────────────────────────────────────────────
+
+_engine = None
+
+
+def get_engine(db_url: Optional[str] = None):
+    """
+    Return the SQLAlchemy engine singleton (or an engine for an explicit db_url).
+
+    The engine is created once and reused. Connection URL comes from settings.db_url
+    (or DATABASE_URL) by default.
+    - For SQLite: check_same_thread=False is enabled.
+    - For PostgreSQL: connection pre-ping and connection pooling are enabled.
+    """
+    global _engine
+    target_url = db_url or settings.db_url
+    if db_url is not None:
+        if target_url.startswith("sqlite"):
+            return create_engine(target_url, connect_args={"check_same_thread": False}, echo=False)
+        return create_engine(target_url, pool_pre_ping=True, pool_size=5, max_overflow=10, echo=False)
+
+    if _engine is None:
+        if target_url.startswith("sqlite"):
+            _engine = create_engine(
+                target_url,
+                connect_args={"check_same_thread": False},
+                echo=False,
+            )
+        else:
+            _engine = create_engine(
+                target_url,
+                pool_pre_ping=True,
+                pool_size=5,
+                max_overflow=10,
+                echo=False,
+            )
+        logger.info("Database engine created: %s", target_url)
+    return _engine
+
+
+def create_all_tables() -> None:
+    """
+    Create all tables defined in models.py if they do not already exist.
+    Safe to call on every startup — idempotent. Also migrates missing columns.
+    """
+    engine = get_engine()
+    Base.metadata.create_all(bind=engine)
+
+    # Lightweight schema migration for newly added columns
+    from sqlalchemy import inspect, text
+    inspector = inspect(engine)
+    table_names = inspector.get_table_names()
+
+    with engine.connect() as conn:
+        if "market_data" in table_names:
+            cols = {c["name"] for c in inspector.get_columns("market_data")}
+            if "data_as_of" not in cols:
+                conn.execute(text("ALTER TABLE market_data ADD COLUMN data_as_of VARCHAR(30)"))
+                conn.commit()
+                logger.info("Migrated schema: added market_data.data_as_of")
+
+        if "portfolio" in table_names:
+            cols = {c["name"] for c in inspector.get_columns("portfolio")}
+            if "total_slippage_cost" not in cols:
+                conn.execute(text("ALTER TABLE portfolio ADD COLUMN total_slippage_cost FLOAT DEFAULT 0.0"))
+                conn.commit()
+                logger.info("Migrated schema: added portfolio.total_slippage_cost")
+            if "highest_price_since_entry" not in cols:
+                conn.execute(text("ALTER TABLE portfolio ADD COLUMN highest_price_since_entry FLOAT"))
+                conn.commit()
+                logger.info("Migrated schema: added portfolio.highest_price_since_entry")
+            if "trailing_stop_price" not in cols:
+                conn.execute(text("ALTER TABLE portfolio ADD COLUMN trailing_stop_price FLOAT"))
+                conn.commit()
+                logger.info("Migrated schema: added portfolio.trailing_stop_price")
+
+        if "trades" in table_names:
+            cols = {c["name"] for c in inspector.get_columns("trades")}
+            if "slippage_cost" not in cols:
+                conn.execute(text("ALTER TABLE trades ADD COLUMN slippage_cost FLOAT DEFAULT 0.0"))
+                conn.commit()
+                logger.info("Migrated schema: added trades.slippage_cost")
+
+    logger.info("All database tables created/verified.")
+
+
+# ── Market data ────────────────────────────────────────────────────────────────
+
+def save_market_data(df: pd.DataFrame) -> int:
+    """
+    Upsert validated OHLCV rows into the market_data table.
+
+    Skips rows that already exist for the same (date, ticker) pair rather
+    than raising. Returns the number of rows inserted.
+
+    Args:
+        df: Validated DataFrame with columns [date, open, high, low, close, volume, ticker].
+
+    Returns:
+        Count of rows inserted (existing rows are skipped).
+    """
+    _assert_safe_write_target()
+    if df.empty:
+        return 0
+
+    required = ["date", "ticker", "open", "high", "low", "close", "volume"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"save_market_data: DataFrame missing columns {missing}")
+
+    inserted = 0
+    with Session(get_engine()) as session:
+        for _, row in df.iterrows():
+            # Check for existing row to avoid unique-constraint errors.
+            existing = session.execute(
+                select(MarketDataRow).where(
+                    MarketDataRow.date == row["date"],
+                    MarketDataRow.ticker == row["ticker"],
+                )
+            ).scalar_one_or_none()
+
+            if existing is None:
+                session.add(MarketDataRow(
+                    date=str(row["date"]),
+                    ticker=str(row["ticker"]),
+                    open=float(row["open"]),
+                    high=float(row["high"]),
+                    low=float(row["low"]),
+                    close=float(row["close"]),
+                    volume=float(row["volume"]),
+                    data_as_of=str(row["data_as_of"]) if ("data_as_of" in row and pd.notna(row["data_as_of"])) else datetime.now(timezone.utc).isoformat(),
+                ))
+                inserted += 1
+
+        session.commit()
+
+    logger.info("save_market_data: inserted %d rows (skipped existing).", inserted)
+    return inserted
+
+
+def get_market_data(
+    ticker: str,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    include_metadata: bool = False,
+) -> pd.DataFrame:
+    """
+    Retrieve validated OHLCV rows for a ticker, optionally filtered by date range.
+
+    Args:
+        ticker: Uppercase ticker symbol.
+        start_date: Inclusive lower bound 'YYYY-MM-DD' (optional).
+        end_date: Inclusive upper bound 'YYYY-MM-DD' (optional).
+        include_metadata: If True, includes metadata columns such as 'data_as_of'.
+
+    Returns:
+        DataFrame with columns [date, ticker, open, high, low, close, volume]
+        (and data_as_of if include_metadata is True).
+    """
+    with Session(get_engine()) as session:
+        stmt = select(MarketDataRow).where(MarketDataRow.ticker == ticker.upper())
+        if start_date:
+            stmt = stmt.where(MarketDataRow.date >= start_date)
+        if end_date:
+            stmt = stmt.where(MarketDataRow.date <= end_date)
+        stmt = stmt.order_by(MarketDataRow.date)
+        rows = session.execute(stmt).scalars().all()
+
+    cols = ["date", "ticker", "open", "high", "low", "close", "volume"]
+    if include_metadata:
+        cols.append("data_as_of")
+
+    if not rows:
+        return pd.DataFrame(columns=cols)
+
+    data = []
+    for r in rows:
+        row_dict = {
+            "date": r.date, "ticker": r.ticker,
+            "open": r.open, "high": r.high, "low": r.low,
+            "close": r.close, "volume": r.volume,
+        }
+        if include_metadata:
+            row_dict["data_as_of"] = r.data_as_of
+        data.append(row_dict)
+
+    return pd.DataFrame(data)
+
+
+# ── Features ──────────────────────────────────────────────────────────────────
+
+def save_features(df: pd.DataFrame) -> int:
+    """
+    Upsert feature vectors into the features table.
+
+    The DataFrame must have 'date' and 'ticker' columns; all other columns
+    are treated as feature values and stored as a JSON blob per row.
+    Existing (date, ticker) rows are overwritten (update on conflict).
+
+    Returns the number of rows upserted.
+    """
+    _assert_safe_write_target()
+    if df.empty:
+        return 0
+
+    if "date" not in df.columns or "ticker" not in df.columns:
+        raise ValueError("save_features: DataFrame must have 'date' and 'ticker' columns.")
+
+    feature_cols = [c for c in df.columns if c not in ("date", "ticker")]
+    upserted = 0
+
+    with Session(get_engine()) as session:
+        for _, row in df.iterrows():
+            feature_dict = {c: row[c] for c in feature_cols}
+            existing = session.execute(
+                select(FeatureRow).where(
+                    FeatureRow.date == row["date"],
+                    FeatureRow.ticker == row["ticker"],
+                )
+            ).scalar_one_or_none()
+
+            if existing is None:
+                session.add(FeatureRow(
+                    date=str(row["date"]),
+                    ticker=str(row["ticker"]),
+                    features=feature_dict,
+                ))
+            else:
+                existing.features = feature_dict
+            upserted += 1
+
+        session.commit()
+
+    logger.info("save_features: upserted %d rows.", upserted)
+    return upserted
+
+
+def get_features(
+    ticker: str,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> pd.DataFrame:
+    """
+    Retrieve feature vectors for a ticker, expanding the JSON blob back
+    into individual columns.
+
+    Returns:
+        DataFrame with columns [date, ticker, <feature_name>, ...].
+    """
+    with Session(get_engine()) as session:
+        stmt = select(FeatureRow).where(FeatureRow.ticker == ticker.upper())
+        if start_date:
+            stmt = stmt.where(FeatureRow.date >= start_date)
+        if end_date:
+            stmt = stmt.where(FeatureRow.date <= end_date)
+        stmt = stmt.order_by(FeatureRow.date)
+        rows = session.execute(stmt).scalars().all()
+
+    if not rows:
+        return pd.DataFrame(columns=["date", "ticker"])
+
+    records = []
+    for r in rows:
+        record = {"date": r.date, "ticker": r.ticker}
+        record.update(r.features or {})
+        records.append(record)
+
+    return pd.DataFrame(records)
+
+
+# ── Predictions ────────────────────────────────────────────────────────────────
+
+def save_predictions(df: pd.DataFrame) -> int:
+    """
+    Upsert model probability predictions into the predictions table.
+
+    DataFrame must have: date, ticker, probability. Optionally: model_version.
+    Existing (date, ticker, model_version) rows are overwritten.
+
+    Returns upserted row count.
+    """
+    _assert_safe_write_target()
+    if df.empty:
+        return 0
+
+    required = ["date", "ticker", "probability"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"save_predictions: DataFrame missing columns {missing}")
+
+    upserted = 0
+    with Session(get_engine()) as session:
+        for _, row in df.iterrows():
+            model_version = str(row.get("model_version", "v1"))
+            existing = session.execute(
+                select(PredictionRow).where(
+                    PredictionRow.date == row["date"],
+                    PredictionRow.ticker == row["ticker"],
+                    PredictionRow.model_version == model_version,
+                )
+            ).scalar_one_or_none()
+
+            if existing is None:
+                session.add(PredictionRow(
+                    date=str(row["date"]),
+                    ticker=str(row["ticker"]),
+                    probability=float(row["probability"]),
+                    model_version=model_version,
+                ))
+            else:
+                existing.probability = float(row["probability"])
+            upserted += 1
+
+        session.commit()
+
+    logger.info("save_predictions: upserted %d rows.", upserted)
+    return upserted
+
+
+def get_predictions(
+    ticker: str,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> pd.DataFrame:
+    """Returns predictions for a ticker as a DataFrame."""
+    with Session(get_engine()) as session:
+        stmt = select(PredictionRow).where(PredictionRow.ticker == ticker.upper())
+        if start_date:
+            stmt = stmt.where(PredictionRow.date >= start_date)
+        if end_date:
+            stmt = stmt.where(PredictionRow.date <= end_date)
+        stmt = stmt.order_by(PredictionRow.date)
+        rows = session.execute(stmt).scalars().all()
+
+    if not rows:
+        return pd.DataFrame(columns=["date", "ticker", "probability", "model_version"])
+
+    return pd.DataFrame([{
+        "date": r.date, "ticker": r.ticker,
+        "probability": r.probability, "model_version": r.model_version,
+    } for r in rows])
+
+
+# ── Portfolio ─────────────────────────────────────────────────────────────────
+
+def save_portfolio_snapshot(
+    run_date: str,
+    cash: float,
+    total_value: float,
+    positions: Optional[Dict[str, Any]] = None,
+    total_slippage_cost: float = 0.0,
+) -> None:
+    """
+    Upsert a portfolio snapshot for a given run date.
+
+    Args:
+        run_date: 'YYYY-MM-DD' string.
+        cash: Current uninvested cash balance.
+        total_value: Total portfolio value (cash + positions).
+        positions: Dict of {ticker: {quantity, avg_cost, current_price, value}}.
+        total_slippage_cost: Cumulative market-impact slippage incurred (Item 15).
+    """
+    _assert_safe_write_target()
+    with Session(get_engine()) as session:
+        existing = session.execute(
+            select(PortfolioSnapshot).where(PortfolioSnapshot.run_date == run_date)
+        ).scalar_one_or_none()
+
+        if existing is None:
+            session.add(PortfolioSnapshot(
+                run_date=run_date,
+                cash=cash,
+                total_value=total_value,
+                total_slippage_cost=float(total_slippage_cost),
+                positions=positions or {},
+            ))
+        else:
+            existing.cash = cash
+            existing.total_value = total_value
+            existing.total_slippage_cost = float(total_slippage_cost)
+            existing.positions = positions or {}
+
+        session.commit()
+
+    logger.info("save_portfolio_snapshot: %s cash=%.2f total=%.2f slippage=%.4f.", run_date, cash, total_value, total_slippage_cost)
+
+
+def get_portfolio_snapshot(run_date: str) -> Optional[Dict[str, Any]]:
+    """Returns the portfolio snapshot for a specific run date, or None."""
+    with Session(get_engine()) as session:
+        row = session.execute(
+            select(PortfolioSnapshot).where(PortfolioSnapshot.run_date == run_date)
+        ).scalar_one_or_none()
+        if row is None:
+            return None
+        return {
+            "run_date": row.run_date,
+            "cash": row.cash,
+            "total_value": row.total_value,
+            "total_slippage_cost": getattr(row, "total_slippage_cost", 0.0) or 0.0,
+            "positions": row.positions,
+        }
+
+
+def get_latest_portfolio_snapshot() -> Optional[Dict[str, Any]]:
+    """Returns the most recent portfolio snapshot by run_date, or None."""
+    with Session(get_engine()) as session:
+        row = session.execute(
+            select(PortfolioSnapshot).order_by(PortfolioSnapshot.run_date.desc()).limit(1)
+        ).scalar_one_or_none()
+        if row is None:
+            return None
+        return {
+            "run_date": row.run_date,
+            "cash": row.cash,
+            "total_value": row.total_value,
+            "total_slippage_cost": getattr(row, "total_slippage_cost", 0.0) or 0.0,
+            "positions": row.positions,
+        }
+
+
+def get_portfolio_snapshots(limit: int = 500) -> List[Dict[str, Any]]:
+    """Returns portfolio snapshots ordered chronologically (for equity curve)."""
+    with Session(get_engine()) as session:
+        rows = session.execute(
+            select(PortfolioSnapshot).order_by(PortfolioSnapshot.run_date.asc()).limit(limit)
+        ).scalars().all()
+        return [{
+            "run_date": r.run_date,
+            "cash": r.cash,
+            "total_value": r.total_value,
+            "total_slippage_cost": getattr(r, "total_slippage_cost", 0.0) or 0.0,
+            "positions": r.positions,
+        } for r in rows]
+
+
+# ── Orders ────────────────────────────────────────────────────────────────────
+
+def save_order(
+    run_date: str,
+    ticker: str,
+    action: str,
+    quantity: float,
+    price: float,
+    reason: str,
+) -> int:
+    """
+    Append an order decision record. Returns the new row id.
+
+    Args:
+        action: 'BUY', 'SELL', or 'HOLD'.
+        reason: Human-readable explanation of which rule triggered this order.
+    """
+    _assert_safe_write_target()
+    with Session(get_engine()) as session:
+        row = OrderRow(
+            run_date=run_date,
+            ticker=ticker.upper(),
+            action=action.upper(),
+            quantity=quantity,
+            price=price,
+            reason=reason,
+        )
+        session.add(row)
+        session.commit()
+        session.refresh(row)
+        row_id = row.id
+
+    logger.info("save_order: %s %s %s qty=%.4f reason=%s", run_date, action, ticker, quantity, reason[:80])
+    return row_id
+
+
+def get_orders(run_date: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
+    """Returns orders for a given run date, or the most recent orders if run_date is None."""
+    with Session(get_engine()) as session:
+        stmt = select(OrderRow)
+        if run_date is not None:
+            stmt = stmt.where(OrderRow.run_date == run_date).order_by(OrderRow.id)
+        else:
+            stmt = stmt.order_by(OrderRow.id.desc()).limit(limit)
+        rows = session.execute(stmt).scalars().all()
+        return [{
+            "id": r.id, "run_date": r.run_date, "ticker": r.ticker,
+            "action": r.action, "quantity": r.quantity,
+            "price": r.price, "reason": r.reason,
+        } for r in rows]
+
+
+# ── Trades ────────────────────────────────────────────────────────────────────
+
+def save_trade(
+    run_date: str,
+    ticker: str,
+    action: str,
+    quantity: float,
+    fill_price: float,
+    cost: float,
+    net_pnl: float,
+    slippage_cost: float = 0.0,
+) -> int:
+    """
+    Record a simulated paper-broker fill. Returns new row id.
+
+    Args:
+        cost:          0.2% of (fill_price * quantity) — always applied (§1.6).
+        net_pnl:       Realized P&L after costs for sells; 0.0 for buys.
+        slippage_cost: Simulated market impact slippage cost ($) based on ADV tier.
+    """
+    _assert_safe_write_target()
+    with Session(get_engine()) as session:
+        row = TradeRow(
+            run_date=run_date,
+            ticker=ticker.upper(),
+            action=action.upper(),
+            quantity=quantity,
+            fill_price=fill_price,
+            cost=cost,
+            net_pnl=net_pnl,
+            slippage_cost=slippage_cost,
+        )
+        session.add(row)
+        session.commit()
+        session.refresh(row)
+        row_id = row.id
+
+    logger.info(
+        "save_trade: %s %s %s fill=%.2f cost=%.4f pnl=%.4f slippage=%.4f",
+        run_date, action, ticker, fill_price, cost, net_pnl, slippage_cost,
+    )
+    return row_id
+
+
+def get_trades(run_date: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
+    """Returns trades for a given run date, or the most recent trades if run_date is None."""
+    with Session(get_engine()) as session:
+        stmt = select(TradeRow)
+        if run_date is not None:
+            stmt = stmt.where(TradeRow.run_date == run_date).order_by(TradeRow.id)
+        else:
+            stmt = stmt.order_by(TradeRow.id.desc()).limit(limit)
+        rows = session.execute(stmt).scalars().all()
+        return [{
+            "id": r.id, "run_date": r.run_date, "ticker": r.ticker,
+            "action": r.action, "quantity": r.quantity,
+            "fill_price": r.fill_price, "cost": r.cost, "net_pnl": r.net_pnl,
+            "slippage_cost": getattr(r, "slippage_cost", 0.0) or 0.0,
+        } for r in rows]
+
+
+# ── Event log ─────────────────────────────────────────────────────────────────
+
+def log_event(
+    level: str,
+    component: str,
+    message: str,
+    details: Optional[Dict[str, Any]] = None,
+) -> None:
+    """
+    Write a structured event to the audit log table.
+
+    Satisfies CLAUDE.md rule 8: 'log everything'. Use this for every
+    prediction, decision, skip, and error that should be persistent
+    (in addition to the Python logger which writes to stderr/files).
+
+    Args:
+        level:     'DEBUG', 'INFO', 'WARNING', 'ERROR', or 'CRITICAL'.
+        component: Which engine emitted this (e.g. 'validation', 'risk_engine').
+        message:   Human-readable description.
+        details:   Optional structured metadata dict.
+    """
+    with Session(get_engine()) as session:
+        session.add(EventLog(
+            level=level.upper(),
+            component=component,
+            message=message,
+            details=details,
+        ))
+        session.commit()
+
+
+def get_events(
+    level: Optional[str] = None,
+    component: Optional[str] = None,
+    limit: int = 100,
+) -> List[Dict[str, Any]]:
+    """
+    Retrieve recent event log entries, newest first.
+
+    Args:
+        level:     Optional filter by log level (e.g. 'ERROR').
+        component: Optional filter by component name.
+        limit:     Maximum rows to return.
+    """
+    with Session(get_engine()) as session:
+        stmt = select(EventLog).order_by(EventLog.timestamp.desc()).limit(limit)
+        if level:
+            stmt = stmt.where(EventLog.level == level.upper())
+        if component:
+            stmt = stmt.where(EventLog.component == component)
+        rows = session.execute(stmt).scalars().all()
+        return [{
+            "id": r.id,
+            "timestamp": r.timestamp.isoformat() if r.timestamp else None,
+            "level": r.level,
+            "component": r.component,
+            "message": r.message,
+            "details": r.details,
+        } for r in rows]
+
+
+# ── Section 5: Intelligence Persistence ───────────────────────────────────────
+
+def save_sentiment_scores(scores: List[Dict[str, Any]]) -> int:
+    """Save headline sentiment scores per (ticker, date). Returns count saved."""
+    _assert_safe_write_target()
+    if not scores:
+        return 0
+    with Session(get_engine()) as session:
+        count = 0
+        for s in scores:
+            session.add(SentimentScoreRow(
+                date=str(s["date"]),
+                ticker=str(s["ticker"]).upper(),
+                headline_count=int(s.get("headline_count", 0)),
+                composite_score=float(s.get("composite_score", 0.0)),
+                sentiment_label=str(s.get("sentiment_label", "NEUTRAL")),
+                data_source=str(s.get("data_source", "YahooFinance")),
+            ))
+            count += 1
+        session.commit()
+        return count
+
+
+def get_latest_sentiment_scores(as_of_date: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
+    """Retrieve latest sentiment scores for each ticker on or before as_of_date."""
+    with Session(get_engine()) as session:
+        stmt = select(SentimentScoreRow).order_by(SentimentScoreRow.date.desc(), SentimentScoreRow.id.desc())
+        if as_of_date:
+            stmt = stmt.where(SentimentScoreRow.date <= as_of_date)
+        rows = session.execute(stmt).scalars().all()
+        result: Dict[str, Dict[str, Any]] = {}
+        for r in rows:
+            if r.ticker not in result:
+                result[r.ticker] = {
+                    "date": r.date,
+                    "ticker": r.ticker,
+                    "headline_count": r.headline_count,
+                    "composite_score": r.composite_score,
+                    "sentiment_label": r.sentiment_label,
+                    "data_source": r.data_source,
+                }
+        return result
+
+
+def save_earnings_calendar(events: List[Dict[str, Any]]) -> int:
+    """Save upcoming earnings dates per ticker. Returns count saved."""
+    _assert_safe_write_target()
+    if not events:
+        return 0
+    with Session(get_engine()) as session:
+        count = 0
+        for e in events:
+            session.add(EarningsCalendarRow(
+                ticker=str(e["ticker"]).upper(),
+                earnings_date=str(e["earnings_date"]),
+                days_until_earnings=int(e["days_until_earnings"]) if e.get("days_until_earnings") is not None else None,
+                fetched_date=str(e["fetched_date"]),
+            ))
+            count += 1
+        session.commit()
+        return count
+
+
+def get_latest_earnings_calendar(as_of_date: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
+    """Retrieve latest earnings record per ticker on or before as_of_date."""
+    with Session(get_engine()) as session:
+        stmt = select(EarningsCalendarRow).order_by(EarningsCalendarRow.fetched_date.desc(), EarningsCalendarRow.id.desc())
+        if as_of_date:
+            stmt = stmt.where(EarningsCalendarRow.fetched_date <= as_of_date)
+        rows = session.execute(stmt).scalars().all()
+        result: Dict[str, Dict[str, Any]] = {}
+        for r in rows:
+            if r.ticker not in result:
+                result[r.ticker] = {
+                    "ticker": r.ticker,
+                    "earnings_date": r.earnings_date,
+                    "days_until_earnings": r.days_until_earnings,
+                    "fetched_date": r.fetched_date,
+                }
+        return result
+
+
+def save_sector_rankings(rankings: List[Dict[str, Any]]) -> int:
+    """Save daily 20-day return ranking for all sectors."""
+    _assert_safe_write_target()
+    if not rankings:
+        return 0
+    with Session(get_engine()) as session:
+        count = 0
+        for r in rankings:
+            session.add(SectorRankingRow(
+                date=str(r["date"]),
+                sector=str(r["sector"]),
+                avg_20d_return=float(r.get("avg_20d_return", 0.0)),
+                rank=int(r["rank"]),
+                rotation_multiplier=float(r.get("rotation_multiplier", 0.0)),
+            ))
+            count += 1
+        session.commit()
+        return count
+
+
+def get_latest_sector_rankings(as_of_date: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Retrieve the latest sector rankings."""
+    with Session(get_engine()) as session:
+        stmt = select(SectorRankingRow).order_by(SectorRankingRow.date.desc(), SectorRankingRow.rank.asc())
+        if as_of_date:
+            stmt = stmt.where(SectorRankingRow.date <= as_of_date)
+        rows = session.execute(stmt).scalars().all()
+        if not rows:
+            return []
+        latest_date = rows[0].date
+        return [
+            {
+                "date": r.date,
+                "sector": r.sector,
+                "avg_20d_return": r.avg_20d_return,
+                "rank": r.rank,
+                "rotation_multiplier": r.rotation_multiplier,
+            }
+            for r in rows if r.date == latest_date
+        ]
+
+
+def save_macro_indicators(ind: Dict[str, Any]) -> None:
+    """Save macroeconomic indicators & regime score."""
+    _assert_safe_write_target()
+    with Session(get_engine()) as session:
+        session.add(MacroIndicatorRow(
+            date=str(ind["date"]),
+            fed_funds_rate=float(ind["fed_funds_rate"]) if ind.get("fed_funds_rate") is not None else None,
+            cpi_yoy=float(ind["cpi_yoy"]) if ind.get("cpi_yoy") is not None else None,
+            unemployment_rate=float(ind["unemployment_rate"]) if ind.get("unemployment_rate") is not None else None,
+            treasury_10y=float(ind["treasury_10y"]) if ind.get("treasury_10y") is not None else None,
+            macro_regime=str(ind.get("macro_regime", "FAVORABLE")),
+            fetched_date=str(ind.get("fetched_date", ind["date"])),
+        ))
+        session.commit()
+
+
+def get_latest_macro_indicators(as_of_date: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Retrieve the latest macroeconomic indicator snapshot."""
+    with Session(get_engine()) as session:
+        stmt = select(MacroIndicatorRow).order_by(MacroIndicatorRow.date.desc(), MacroIndicatorRow.id.desc())
+        if as_of_date:
+            stmt = stmt.where(MacroIndicatorRow.date <= as_of_date)
+        row = session.execute(stmt).scalars().first()
+        if not row:
+            return None
+        return {
+            "date": row.date,
+            "fed_funds_rate": row.fed_funds_rate,
+            "cpi_yoy": row.cpi_yoy,
+            "unemployment_rate": row.unemployment_rate,
+            "treasury_10y": row.treasury_10y,
+            "macro_regime": row.macro_regime,
+            "fetched_date": row.fetched_date,
+        }
+
+
+def save_correlation_matrix(records: List[Dict[str, Any]]) -> int:
+    """
+    Saves pairwise correlation matrix entries into correlation_matrix table.
+    """
+    _assert_safe_write_target()
+    if not records:
+        return 0
+
+    inserted = 0
+    with Session(get_engine()) as session:
+        for rec in records:
+            dt = str(rec["date"])
+            t_a = str(rec["ticker_a"]).upper()
+            t_b = str(rec["ticker_b"]).upper()
+            existing = session.execute(
+                select(CorrelationMatrixRow).where(
+                    CorrelationMatrixRow.date == dt,
+                    CorrelationMatrixRow.ticker_a == t_a,
+                    CorrelationMatrixRow.ticker_b == t_b,
+                )
+            ).scalar_one_or_none()
+
+            if existing is None:
+                session.add(CorrelationMatrixRow(
+                    date=dt,
+                    ticker_a=t_a,
+                    ticker_b=t_b,
+                    correlation=float(rec["correlation"]),
+                    lookback_days=int(rec.get("lookback_days", 60)),
+                ))
+                inserted += 1
+            else:
+                existing.correlation = float(rec["correlation"])
+                existing.lookback_days = int(rec.get("lookback_days", 60))
+
+        session.commit()
+    logger.info("save_correlation_matrix: saved %d correlation records.", len(records))
+    return inserted
+
+
+def get_correlation_matrix(date_str: Optional[str] = None) -> List[Dict[str, Any]]:
+    """
+    Retrieves pairwise correlation matrix entries for a given date (or latest date).
+    """
+    with Session(get_engine()) as session:
+        if date_str is None:
+            latest_row = session.execute(
+                select(CorrelationMatrixRow).order_by(CorrelationMatrixRow.date.desc())
+            ).scalars().first()
+            if not latest_row:
+                return []
+            date_str = latest_row.date
+
+        rows = session.execute(
+            select(CorrelationMatrixRow).where(CorrelationMatrixRow.date == date_str)
+        ).scalars().all()
+
+        return [{
+            "date": r.date,
+            "ticker_a": r.ticker_a,
+            "ticker_b": r.ticker_b,
+            "correlation": r.correlation,
+            "lookback_days": r.lookback_days,
+        } for r in rows]
+
+
+# ── Feature Importance (Section 9 Item 2) ─────────────────────────────────────
+
+def save_feature_importances(date_str: str, model_type: str, importances: Dict[str, float]) -> int:
+    """
+    Upsert feature importance scores for one model training run.
+
+    Parameters
+    ----------
+    date_str : str   — ISO date of the retrain (YYYY-MM-DD).
+    model_type : str — e.g. 'primary', 'xgboost', 'baseline', 'ensemble'.
+    importances : dict — {feature_name: importance_score}.
+
+    Returns number of rows written.
+    """
+    _assert_safe_write_target()
+    if not importances:
+        return 0
+
+    inserted = 0
+    with Session(get_engine()) as session:
+        for feat, score in importances.items():
+            existing = session.execute(
+                select(FeatureImportanceRow).where(
+                    FeatureImportanceRow.date == date_str,
+                    FeatureImportanceRow.model_type == model_type,
+                    FeatureImportanceRow.feature_name == feat,
+                )
+            ).scalar_one_or_none()
+
+            if existing is None:
+                session.add(FeatureImportanceRow(
+                    date=date_str,
+                    model_type=model_type,
+                    feature_name=feat,
+                    importance_score=float(score),
+                ))
+                inserted += 1
+            else:
+                existing.importance_score = float(score)
+
+        session.commit()
+
+    logger.info(
+        "save_feature_importances: saved %d importance records for model_type=%s date=%s.",
+        len(importances), model_type, date_str,
+    )
+    return inserted
+
+
+def get_feature_importances(model_type: str, date_str: Optional[str] = None) -> List[Dict[str, Any]]:
+    """
+    Load feature importance scores for the most recent retrain (or a specific date).
+
+    Returns list of {feature_name, importance_score, date, model_type} sorted by importance descending.
+    """
+    with Session(get_engine()) as session:
+        q = select(FeatureImportanceRow).where(FeatureImportanceRow.model_type == model_type)
+        if date_str:
+            q = q.where(FeatureImportanceRow.date == date_str)
+        else:
+            # Find the latest date
+            latest = session.execute(
+                select(FeatureImportanceRow.date)
+                .where(FeatureImportanceRow.model_type == model_type)
+                .order_by(FeatureImportanceRow.date.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+            if latest is None:
+                return []
+            q = q.where(FeatureImportanceRow.date == latest)
+
+        rows = session.execute(q.order_by(FeatureImportanceRow.importance_score.desc())).scalars().all()
+        return [
+            {
+                "date": r.date,
+                "model_type": r.model_type,
+                "feature_name": r.feature_name,
+                "importance_score": r.importance_score,
+            }
+            for r in rows
+        ]
+
+
+def get_feature_importance_history(
+    model_type: str,
+    top_n_features: int = 5,
+    last_n_retrains: int = 5,
+) -> List[Dict[str, Any]]:
+    """
+    Return feature importance time-series for the top N features across the last N retrains.
+
+    Returns list of {date, feature_name, importance_score, model_type}.
+    """
+    with Session(get_engine()) as session:
+        # Get distinct dates for this model_type, most recent first
+        dates_q = (
+            select(FeatureImportanceRow.date)
+            .where(FeatureImportanceRow.model_type == model_type)
+            .distinct()
+            .order_by(FeatureImportanceRow.date.desc())
+            .limit(last_n_retrains)
+        )
+        date_rows = session.execute(dates_q).scalars().all()
+        if not date_rows:
+            return []
+
+        # Find top-N features by importance on the latest date
+        latest_date = date_rows[0]
+        top_feats_q = (
+            select(FeatureImportanceRow.feature_name)
+            .where(
+                FeatureImportanceRow.model_type == model_type,
+                FeatureImportanceRow.date == latest_date,
+            )
+            .order_by(FeatureImportanceRow.importance_score.desc())
+            .limit(top_n_features)
+        )
+        top_features = session.execute(top_feats_q).scalars().all()
+        if not top_features:
+            return []
+
+        # Get history for those features across all selected dates
+        history_q = select(FeatureImportanceRow).where(
+            FeatureImportanceRow.model_type == model_type,
+            FeatureImportanceRow.date.in_(date_rows),
+            FeatureImportanceRow.feature_name.in_(top_features),
+        ).order_by(FeatureImportanceRow.date.asc(), FeatureImportanceRow.importance_score.desc())
+        rows = session.execute(history_q).scalars().all()
+
+        return [
+            {
+                "date": r.date,
+                "model_type": r.model_type,
+                "feature_name": r.feature_name,
+                "importance_score": r.importance_score,
+            }
+            for r in rows
+        ]
+
+
+# ── Section 10 Item 1: Paper Trading Leaderboard Repository CRUD ──────────────
+
+def save_strategy_variant(
+    name: str,
+    settings_dict: Dict[str, Any],
+    starting_capital: float = 10000.0,
+    created_date: Optional[str] = None,
+) -> int:
+    """Save or return existing strategy variant row by name."""
+    _assert_safe_write_target()
+    today_str = created_date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    with Session(get_engine()) as session:
+        stmt = select(StrategyVariantRow).where(StrategyVariantRow.name == name)
+        existing = session.execute(stmt).scalar_one_or_none()
+        if existing:
+            return int(existing.id)
+
+        row = StrategyVariantRow(
+            name=name,
+            settings_json=json.dumps(settings_dict),
+            created_date=today_str,
+            is_active=True,
+            starting_capital=starting_capital,
+        )
+        session.add(row)
+        session.commit()
+        session.refresh(row)
+        return int(row.id)
+
+
+def get_strategy_variants(only_active: bool = True) -> List[Dict[str, Any]]:
+    """Return all saved strategy variants."""
+    with Session(get_engine()) as session:
+        stmt = select(StrategyVariantRow)
+        if only_active:
+            stmt = stmt.where(StrategyVariantRow.is_active == True)
+        stmt = stmt.order_by(StrategyVariantRow.id.asc())
+        rows = session.execute(stmt).scalars().all()
+        return [
+            {
+                "id": r.id,
+                "name": r.name,
+                "settings": json.loads(r.settings_json),
+                "created_date": r.created_date,
+                "is_active": r.is_active,
+                "starting_capital": r.starting_capital,
+            }
+            for r in rows
+        ]
+
+
+def save_strategy_snapshot(
+    strategy_id: int,
+    date_str: str,
+    portfolio_value: float,
+    cash: float,
+    positions: Dict[str, Any],
+    daily_return: float = 0.0,
+) -> int:
+    """Save a daily snapshot for a strategy variant."""
+    _assert_safe_write_target()
+    with Session(get_engine()) as session:
+        row = StrategySnapshotRow(
+            strategy_id=strategy_id,
+            date=date_str,
+            portfolio_value=portfolio_value,
+            cash=cash,
+            positions_json=json.dumps(positions),
+            daily_return=daily_return,
+        )
+        session.add(row)
+        session.commit()
+        session.refresh(row)
+        return int(row.id)
+
+
+def get_strategy_snapshots(strategy_id: Optional[int] = None) -> List[Dict[str, Any]]:
+    """Query portfolio snapshots for a strategy (or all strategies)."""
+    with Session(get_engine()) as session:
+        stmt = select(StrategySnapshotRow)
+        if strategy_id is not None:
+            stmt = stmt.where(StrategySnapshotRow.strategy_id == strategy_id)
+        stmt = stmt.order_by(StrategySnapshotRow.date.asc(), StrategySnapshotRow.strategy_id.asc())
+        rows = session.execute(stmt).scalars().all()
+        return [
+            {
+                "id": r.id,
+                "strategy_id": r.strategy_id,
+                "date": r.date,
+                "portfolio_value": r.portfolio_value,
+                "cash": r.cash,
+                "positions": json.loads(r.positions_json or "{}"),
+                "daily_return": r.daily_return,
+            }
+            for r in rows
+        ]
+
+
+def save_strategy_trade(
+    strategy_id: int,
+    date_str: str,
+    ticker: str,
+    action: str,
+    price: float,
+    shares: float,
+    pnl: float = 0.0,
+) -> int:
+    """Record an executed trade for a strategy variant."""
+    _assert_safe_write_target()
+    with Session(get_engine()) as session:
+        row = StrategyTradeRow(
+            strategy_id=strategy_id,
+            date=date_str,
+            ticker=ticker,
+            action=action,
+            price=price,
+            shares=shares,
+            pnl=pnl,
+        )
+        session.add(row)
+        session.commit()
+        session.refresh(row)
+        return int(row.id)
+
+
+def get_strategy_trades(strategy_id: Optional[int] = None) -> List[Dict[str, Any]]:
+    """Query executed trades for a strategy (or all strategies)."""
+    with Session(get_engine()) as session:
+        stmt = select(StrategyTradeRow)
+        if strategy_id is not None:
+            stmt = stmt.where(StrategyTradeRow.strategy_id == strategy_id)
+        stmt = stmt.order_by(StrategyTradeRow.date.asc(), StrategyTradeRow.id.asc())
+        rows = session.execute(stmt).scalars().all()
+        return [
+            {
+                "id": r.id,
+                "strategy_id": r.strategy_id,
+                "date": r.date,
+                "ticker": r.ticker,
+                "action": r.action,
+                "price": r.price,
+                "shares": r.shares,
+                "pnl": r.pnl,
+            }
+            for r in rows
+        ]

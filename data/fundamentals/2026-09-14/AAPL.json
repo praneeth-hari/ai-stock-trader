@@ -1,0 +1,22 @@
+{
+  "ticker": "AAPL",
+  "fetch_date": "2026-09-14",
+  "trailing_pe": null,
+  "forward_pe": null,
+  "peg_ratio": null,
+  "price_to_book": null,
+  "enterprise_to_ebitda": null,
+  "profit_margins": null,
+  "operating_margins": null,
+  "return_on_equity": null,
+  "return_on_assets": null,
+  "revenue_growth": null,
+  "earnings_growth": null,
+  "debt_to_equity": null,
+  "current_ratio": null,
+  "free_cash_flow": null,
+  "operating_cash_flow": null,
+  "dividend_yield": null,
+  "payout_ratio": null,
+  "market_cap": null
+}

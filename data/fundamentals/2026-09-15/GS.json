@@ -1,0 +1,22 @@
+{
+  "ticker": "GS",
+  "fetch_date": "2026-09-15",
+  "trailing_pe": 14.819586,
+  "forward_pe": 12.959454,
+  "peg_ratio": 1.22,
+  "price_to_book": 2.6499727,
+  "enterprise_to_ebitda": null,
+  "profit_margins": 0.31039,
+  "operating_margins": 0.42176998,
+  "return_on_equity": 0.16902,
+  "return_on_assets": 0.010720001,
+  "revenue_growth": 0.425,
+  "earnings_growth": 0.923,
+  "debt_to_equity": 725.381,
+  "current_ratio": 1.563,
+  "free_cash_flow": null,
+  "operating_cash_flow": -39359000576.0,
+  "dividend_yield": 2.02,
+  "payout_ratio": 0.2625,
+  "market_cap": 279355654144.0
+}

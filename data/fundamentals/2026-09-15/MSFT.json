@@ -1,0 +1,22 @@
+{
+  "ticker": "MSFT",
+  "fetch_date": "2026-09-15",
+  "trailing_pe": 28.17224,
+  "forward_pe": 21.422323,
+  "peg_ratio": 1.61,
+  "price_to_book": 8.485017,
+  "enterprise_to_ebitda": 19.589,
+  "profit_margins": 0.40305,
+  "operating_margins": 0.45111,
+  "return_on_equity": 0.34039003,
+  "return_on_assets": 0.14088,
+  "revenue_growth": 0.177,
+  "earnings_growth": 0.317,
+  "debt_to_equity": 29.118,
+  "current_ratio": 1.23,
+  "free_cash_flow": 16545500160.0,
+  "operating_cash_flow": 182934994944.0,
+  "dividend_yield": 0.73,
+  "payout_ratio": 0.1983,
+  "market_cap": 3752944992256.0
+}

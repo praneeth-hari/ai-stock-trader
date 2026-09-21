@@ -1,0 +1,22 @@
+{
+  "ticker": "HON",
+  "fetch_date": "2026-09-15",
+  "trailing_pe": 7.7405877,
+  "forward_pe": 20.239819,
+  "peg_ratio": 3.29,
+  "price_to_book": 3.443673,
+  "enterprise_to_ebitda": 10.562,
+  "profit_margins": 0.21581,
+  "operating_margins": 0.20249,
+  "return_on_equity": 0.46577,
+  "return_on_assets": 0.0572,
+  "revenue_growth": 0.043,
+  "earnings_growth": 2.639,
+  "debt_to_equity": 185.369,
+  "current_ratio": 1.211,
+  "free_cash_flow": 2610374912.0,
+  "operating_cash_flow": 5118000128.0,
+  "dividend_yield": 1.39,
+  "payout_ratio": 0.3614,
+  "market_cap": 63834914816.0
+}

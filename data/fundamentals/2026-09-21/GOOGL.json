@@ -1,0 +1,22 @@
+{
+  "ticker": "GOOGL",
+  "fetch_date": "2026-09-21",
+  "trailing_pe": 17.54719,
+  "forward_pe": 23.48764,
+  "peg_ratio": 1.27,
+  "price_to_book": 6.8677306,
+  "enterprise_to_ebitda": 24.088,
+  "profit_margins": 0.54771,
+  "operating_margins": 0.34033,
+  "return_on_equity": 0.48676,
+  "return_on_assets": 0.12958999,
+  "revenue_growth": 0.242,
+  "earnings_growth": 2.94,
+  "debt_to_equity": 18.859,
+  "current_ratio": 2.724,
+  "free_cash_flow": 22665000960.0,
+  "operating_cash_flow": 185675005952.0,
+  "dividend_yield": 0.25,
+  "payout_ratio": 0.042600002,
+  "market_cap": 4274851676160.0
+}

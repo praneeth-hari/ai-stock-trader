@@ -1,0 +1,47 @@
+# Never upload these!
+.env
+*.db
+data/raw/
+data/processed/
+data/models/
+models/*.pkl
+logs/
+__pycache__/
+*.pyc
+*.py[cod]
+.venv/
+venv/
+env/
+ENV/
+
+# ── Python build artefacts ───────────────────────────────────────────────────
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.spec
+
+# ── Testing / coverage ────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+*.xml
+
+# ── IDE / editor ──────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── OS noise ─────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Logs (can be large; keep locally, don't commit) ──────────────────────────
+*.log

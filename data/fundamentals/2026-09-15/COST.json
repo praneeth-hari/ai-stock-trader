@@ -1,0 +1,22 @@
+{
+  "ticker": "COST",
+  "fetch_date": "2026-09-15",
+  "trailing_pe": 45.7534,
+  "forward_pe": 40.136,
+  "peg_ratio": 4.5,
+  "price_to_book": 24.36303,
+  "enterprise_to_ebitda": 29.433,
+  "profit_margins": 0.0301,
+  "operating_margins": 0.036730003,
+  "return_on_equity": 0.29152,
+  "return_on_assets": 0.086660005,
+  "revenue_growth": 0.215,
+  "earnings_growth": 0.455,
+  "debt_to_equity": 60.257,
+  "current_ratio": 1.072,
+  "free_cash_flow": 6954375168.0,
+  "operating_cash_flow": 15000000512.0,
+  "dividend_yield": 0.64,
+  "payout_ratio": 0.2701,
+  "market_cap": 402769674240.0
+}

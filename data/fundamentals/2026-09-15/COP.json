@@ -1,0 +1,22 @@
+{
+  "ticker": "COP",
+  "fetch_date": "2026-09-15",
+  "trailing_pe": 18.564816,
+  "forward_pe": 14.475041,
+  "peg_ratio": 1.16,
+  "price_to_book": 2.5801058,
+  "enterprise_to_ebitda": 6.713,
+  "profit_margins": 0.144,
+  "operating_margins": 0.3151,
+  "return_on_equity": 0.1418,
+  "return_on_assets": 0.07533,
+  "revenue_growth": 0.355,
+  "earnings_growth": 1.07,
+  "debt_to_equity": 35.639,
+  "current_ratio": 1.542,
+  "free_cash_flow": 7691375104.0,
+  "operating_cash_flow": 21924999168.0,
+  "dividend_yield": 2.46,
+  "payout_ratio": 0.4365,
+  "market_cap": 168607727616.0
+}

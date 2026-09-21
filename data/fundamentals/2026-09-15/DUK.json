@@ -1,0 +1,22 @@
+{
+  "ticker": "DUK",
+  "fetch_date": "2026-09-15",
+  "trailing_pe": 17.783133,
+  "forward_pe": 16.463293,
+  "peg_ratio": 2.22,
+  "price_to_book": 1.7126447,
+  "enterprise_to_ebitda": 11.279,
+  "profit_margins": 0.15995,
+  "operating_margins": 0.27503002,
+  "return_on_equity": 0.098570004,
+  "return_on_assets": 0.028369999,
+  "revenue_growth": 0.011,
+  "earnings_growth": 0.106,
+  "debt_to_equity": 162.155,
+  "current_ratio": 0.661,
+  "free_cash_flow": -4477374976.0,
+  "operating_cash_flow": 11562000384.0,
+  "dividend_yield": 3.65,
+  "payout_ratio": 0.6416,
+  "market_cap": 92067241984.0
+}

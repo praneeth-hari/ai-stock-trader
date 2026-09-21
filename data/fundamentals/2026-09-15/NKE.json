@@ -1,0 +1,22 @@
+{
+  "ticker": "NKE",
+  "fetch_date": "2026-09-15",
+  "trailing_pe": 17.324905,
+  "forward_pe": 15.896145,
+  "peg_ratio": 1.44,
+  "price_to_book": 3.6295192,
+  "enterprise_to_ebitda": 11.56,
+  "profit_margins": 0.066989996,
+  "operating_margins": 0.12687,
+  "return_on_equity": 0.22138001,
+  "return_on_assets": 0.06971,
+  "revenue_growth": -0.011,
+  "earnings_growth": 4.28,
+  "debt_to_equity": 74.289,
+  "current_ratio": 1.961,
+  "free_cash_flow": 1889250048.0,
+  "operating_cash_flow": 2868000000.0,
+  "dividend_yield": 4.43,
+  "payout_ratio": 0.77620006,
+  "market_cap": 53973098496.0
+}

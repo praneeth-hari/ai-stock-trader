@@ -1,0 +1,22 @@
+{
+  "ticker": "PEP",
+  "fetch_date": "2026-09-15",
+  "trailing_pe": 17.763742,
+  "forward_pe": 15.1207905,
+  "peg_ratio": 1.4,
+  "price_to_book": 8.3893795,
+  "enterprise_to_ebitda": 12.115,
+  "profit_margins": 0.10785,
+  "operating_margins": 0.16836001,
+  "return_on_equity": 0.51508,
+  "return_on_assets": 0.08931,
+  "revenue_growth": 0.064,
+  "earnings_growth": 1.37,
+  "debt_to_equity": 238.949,
+  "current_ratio": 0.934,
+  "free_cash_flow": 7831875072.0,
+  "operating_cash_flow": 13456000000.0,
+  "dividend_yield": 4.34,
+  "payout_ratio": 0.7533,
+  "market_cap": 185386680320.0
+}

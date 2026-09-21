@@ -1,0 +1,22 @@
+{
+  "ticker": "WMT",
+  "fetch_date": "2026-09-13",
+  "trailing_pe": 38.822464,
+  "forward_pe": 33.168446,
+  "peg_ratio": 4.09,
+  "price_to_book": 9.043721,
+  "enterprise_to_ebitda": 20.88,
+  "profit_margins": 0.03,
+  "operating_margins": 0.0345,
+  "return_on_equity": 0.22313999,
+  "return_on_assets": 0.06414,
+  "revenue_growth": 0.059,
+  "earnings_growth": -0.091,
+  "debt_to_equity": 71.653,
+  "current_ratio": 0.767,
+  "free_cash_flow": 7127625216.0,
+  "operating_cash_flow": 42922999808.0,
+  "dividend_yield": 0.92,
+  "payout_ratio": 0.3496,
+  "market_cap": 852708163584.0
+}

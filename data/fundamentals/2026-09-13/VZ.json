@@ -1,0 +1,22 @@
+{
+  "ticker": "VZ",
+  "fetch_date": "2026-09-13",
+  "trailing_pe": 13.1796875,
+  "forward_pe": 9.585809,
+  "peg_ratio": 0.9,
+  "price_to_book": 2.023429,
+  "enterprise_to_ebitda": 7.897,
+  "profit_margins": 0.11643,
+  "operating_margins": 0.22999,
+  "return_on_equity": 0.15842,
+  "return_on_assets": 0.050479997,
+  "revenue_growth": -0.007,
+  "earnings_growth": -0.22,
+  "debt_to_equity": 184.081,
+  "current_ratio": 0.604,
+  "free_cash_flow": 17466624000.0,
+  "operating_cash_flow": 38798999552.0,
+  "dividend_yield": 5.59,
+  "payout_ratio": 0.7279,
+  "market_cap": 210273173504.0
+}

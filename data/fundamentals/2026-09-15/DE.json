@@ -1,0 +1,22 @@
+{
+  "ticker": "DE",
+  "fetch_date": "2026-09-15",
+  "trailing_pe": 38.0403,
+  "forward_pe": 30.13728,
+  "peg_ratio": 1.58,
+  "price_to_book": 6.5922203,
+  "enterprise_to_ebitda": 25.975,
+  "profit_margins": 0.10168,
+  "operating_margins": 0.17479,
+  "return_on_equity": 0.18242,
+  "return_on_assets": 0.03759,
+  "revenue_growth": -0.111,
+  "earnings_growth": -0.085,
+  "debt_to_equity": 376.022,
+  "current_ratio": 2.132,
+  "free_cash_flow": 4516250112.0,
+  "operating_cash_flow": 7245000192.0,
+  "dividend_yield": 0.95,
+  "payout_ratio": 0.36020002,
+  "market_cap": 184516788224.0
+}

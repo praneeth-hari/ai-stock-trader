@@ -1,0 +1,22 @@
+{
+  "ticker": "ABBV",
+  "fetch_date": "2026-09-19",
+  "trailing_pe": 74.56497,
+  "forward_pe": 16.226177,
+  "peg_ratio": 0.54,
+  "price_to_book": -78.58291,
+  "enterprise_to_ebitda": 17.255,
+  "profit_margins": 0.098000005,
+  "operating_margins": 0.40035,
+  "return_on_equity": null,
+  "return_on_assets": 0.105100006,
+  "revenue_growth": 0.102,
+  "earnings_growth": 2.904,
+  "debt_to_equity": null,
+  "current_ratio": 0.809,
+  "free_cash_flow": 16870250496.0,
+  "operating_cash_flow": 19506999296.0,
+  "dividend_yield": 2.62,
+  "payout_ratio": 1.9039999,
+  "market_cap": 466448285696.0
+}

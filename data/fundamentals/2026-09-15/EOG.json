@@ -1,0 +1,22 @@
+{
+  "ticker": "EOG",
+  "fetch_date": "2026-09-15",
+  "trailing_pe": 11.915953,
+  "forward_pe": 10.440816,
+  "peg_ratio": 1.41,
+  "price_to_book": 2.5252323,
+  "enterprise_to_ebitda": 5.606,
+  "profit_margins": 0.25733,
+  "operating_margins": 0.40717998,
+  "return_on_equity": 0.22507,
+  "return_on_assets": 0.11017,
+  "revenue_growth": 0.587,
+  "earnings_growth": 1.094,
+  "debt_to_equity": 25.891,
+  "current_ratio": 1.851,
+  "free_cash_flow": 4478750208.0,
+  "operating_cash_flow": 13358000128.0,
+  "dividend_yield": 2.75,
+  "payout_ratio": 0.314,
+  "market_cap": 80315908096.0
+}

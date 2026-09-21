@@ -1,0 +1,22 @@
+{
+  "ticker": "TMO",
+  "fetch_date": "2026-09-13",
+  "trailing_pe": 32.786022,
+  "forward_pe": 22.150167,
+  "peg_ratio": 1.82,
+  "price_to_book": 4.2802496,
+  "enterprise_to_ebitda": 22.497,
+  "profit_margins": 0.15036,
+  "operating_margins": 0.18751,
+  "return_on_equity": 0.13515,
+  "return_on_assets": 0.05129,
+  "revenue_growth": 0.105,
+  "earnings_growth": 0.094,
+  "debt_to_equity": 80.575,
+  "current_ratio": 1.551,
+  "free_cash_flow": 6237250048.0,
+  "operating_cash_flow": 9013000192.0,
+  "dividend_yield": 0.31,
+  "payout_ratio": 0.09689999,
+  "market_cap": 225479294976.0
+}

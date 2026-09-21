@@ -1,0 +1,22 @@
+{
+  "ticker": "UNH",
+  "fetch_date": "2026-09-15",
+  "trailing_pe": 24.681467,
+  "forward_pe": 17.01221,
+  "peg_ratio": 1.03,
+  "price_to_book": 3.5258913,
+  "enterprise_to_ebitda": 14.753,
+  "profit_margins": 0.03135,
+  "operating_margins": 0.071329996,
+  "return_on_equity": 0.14152999,
+  "return_on_assets": 0.04871,
+  "revenue_growth": 0.004,
+  "earnings_growth": 0.615,
+  "debt_to_equity": 69.211,
+  "current_ratio": 0.777,
+  "free_cash_flow": 24272250880.0,
+  "operating_cash_flow": 27017000960.0,
+  "dividend_yield": 2.45,
+  "payout_ratio": 0.5752,
+  "market_cap": 344272470016.0
+}

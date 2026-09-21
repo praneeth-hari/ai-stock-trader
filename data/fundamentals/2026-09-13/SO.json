@@ -1,0 +1,22 @@
+{
+  "ticker": "SO",
+  "fetch_date": "2026-09-13",
+  "trailing_pe": 21.004818,
+  "forward_pe": 17.701971,
+  "peg_ratio": 2.06,
+  "price_to_book": 2.534159,
+  "enterprise_to_ebitda": 12.425,
+  "profit_margins": 0.15435,
+  "operating_margins": 0.29612,
+  "return_on_equity": 0.114829995,
+  "return_on_assets": 0.03271,
+  "revenue_growth": 0.001,
+  "earnings_growth": 0.304,
+  "debt_to_equity": 182.058,
+  "current_ratio": 0.787,
+  "free_cash_flow": -3913374976.0,
+  "operating_cash_flow": 10650999808.0,
+  "dividend_yield": 3.49,
+  "payout_ratio": 0.71809995,
+  "market_cap": 100277141504.0
+}

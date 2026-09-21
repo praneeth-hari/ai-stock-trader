@@ -1,0 +1,22 @@
+{
+  "ticker": "MA",
+  "fetch_date": "2026-09-13",
+  "trailing_pe": 31.343061,
+  "forward_pe": 24.720724,
+  "peg_ratio": 1.49,
+  "price_to_book": 88.99156,
+  "enterprise_to_ebitda": 23.046,
+  "profit_margins": 0.46339,
+  "operating_margins": 0.61108,
+  "return_on_equity": 2.41202,
+  "return_on_assets": 0.24063,
+  "revenue_growth": 0.141,
+  "earnings_growth": 0.221,
+  "debt_to_equity": 439.583,
+  "current_ratio": 1.061,
+  "free_cash_flow": 16961250304.0,
+  "operating_cash_flow": 17436999680.0,
+  "dividend_yield": 0.61,
+  "payout_ratio": 0.17930001,
+  "market_cap": 498616074240.0
+}

@@ -1,0 +1,22 @@
+{
+  "ticker": "XOM",
+  "fetch_date": "2026-09-13",
+  "trailing_pe": 21.362936,
+  "forward_pe": 15.382733,
+  "peg_ratio": 1.42,
+  "price_to_book": 2.6314204,
+  "enterprise_to_ebitda": 10.613,
+  "profit_margins": 0.09072,
+  "operating_margins": 0.15859,
+  "return_on_equity": 0.12584,
+  "return_on_assets": 0.055209998,
+  "revenue_growth": 0.441,
+  "earnings_growth": 1.128,
+  "debt_to_equity": 15.921,
+  "current_ratio": 1.135,
+  "free_cash_flow": 20671000576.0,
+  "operating_cash_flow": 59726999552.0,
+  "dividend_yield": 2.48,
+  "payout_ratio": 0.5251,
+  "market_cap": 682536271872.0
+}

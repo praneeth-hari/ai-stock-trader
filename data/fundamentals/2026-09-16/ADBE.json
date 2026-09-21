@@ -1,0 +1,22 @@
+{
+  "ticker": "ADBE",
+  "fetch_date": "2026-09-16",
+  "trailing_pe": 14.114338,
+  "forward_pe": 9.13526,
+  "peg_ratio": 0.64,
+  "price_to_book": 8.487939,
+  "enterprise_to_ebitda": 10.552,
+  "profit_margins": 0.28048,
+  "operating_margins": 0.34822,
+  "return_on_equity": 0.61902,
+  "return_on_assets": 0.19731002,
+  "revenue_growth": 0.129,
+  "earnings_growth": 0.105,
+  "debt_to_equity": 57.48,
+  "current_ratio": 0.77,
+  "free_cash_flow": 9129875456.0,
+  "operating_cash_flow": 10805999616.0,
+  "dividend_yield": null,
+  "payout_ratio": 0.0,
+  "market_cap": 100483145728.0
+}

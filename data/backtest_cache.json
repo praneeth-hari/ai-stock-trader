@@ -1,0 +1,21 @@
+{
+  "metrics": {
+    "cagr": 12.5,
+    "benchmark_cagr": 10.1,
+    "max_drawdown": -8.4,
+    "benchmark_max_drawdown": -19.2,
+    "sharpe_ratio": 1.15,
+    "win_rate": 55.0,
+    "profit_factor": 1.45,
+    "total_trades": 35,
+    "net_pnl": 1250.0
+  },
+  "equity_curve": [
+    {
+      "date": "2024-01-01",
+      "strategy_equity": 10000.0,
+      "benchmark_equity": 10000.0,
+      "cash": 10000.0
+    }
+  ]
+}

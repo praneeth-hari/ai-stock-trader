@@ -1,0 +1,22 @@
+{
+  "ticker": "BRK-B",
+  "fetch_date": "2026-09-13",
+  "trailing_pe": 12.836268,
+  "forward_pe": 22.997368,
+  "peg_ratio": 10.06,
+  "price_to_book": 0.0009772973,
+  "enterprise_to_ebitda": -1.79,
+  "profit_margins": 0.22296,
+  "operating_margins": 0.32561,
+  "return_on_equity": 0.121199995,
+  "return_on_assets": 0.060100004,
+  "revenue_growth": 0.1,
+  "earnings_growth": 1.078,
+  "debt_to_equity": 17.142,
+  "current_ratio": 2.891,
+  "free_cash_flow": 71975247872.0,
+  "operating_cash_flow": 46634000384.0,
+  "dividend_yield": null,
+  "payout_ratio": 0.0,
+  "market_cap": 1092553998336.0
+}

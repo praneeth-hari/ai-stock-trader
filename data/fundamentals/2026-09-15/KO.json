@@ -1,0 +1,22 @@
+{
+  "ticker": "KO",
+  "fetch_date": "2026-09-15",
+  "trailing_pe": 26.563065,
+  "forward_pe": 25.083797,
+  "peg_ratio": 4.06,
+  "price_to_book": 10.529104,
+  "enterprise_to_ebitda": 24.385,
+  "profit_margins": 0.28558,
+  "operating_margins": 0.34873,
+  "return_on_equity": 0.42054,
+  "return_on_assets": 0.09401,
+  "revenue_growth": 0.067,
+  "earnings_growth": 0.169,
+  "debt_to_equity": 115.519,
+  "current_ratio": 1.305,
+  "free_cash_flow": 5218749952.0,
+  "operating_cash_flow": 16341999616.0,
+  "dividend_yield": 2.37,
+  "payout_ratio": 0.6246,
+  "market_cap": 380581969920.0
+}

@@ -1,0 +1,22 @@
+{
+  "ticker": "CAT",
+  "fetch_date": "2026-09-15",
+  "trailing_pe": 33.658768,
+  "forward_pe": 24.128603,
+  "peg_ratio": 1.43,
+  "price_to_book": 18.515392,
+  "enterprise_to_ebitda": 24.588,
+  "profit_margins": 0.14511,
+  "operating_margins": 0.22183001,
+  "return_on_equity": 0.56972003,
+  "return_on_assets": 0.090299994,
+  "revenue_growth": 0.24,
+  "earnings_growth": 0.682,
+  "debt_to_equity": 232.783,
+  "current_ratio": 1.368,
+  "free_cash_flow": 5048999936.0,
+  "operating_cash_flow": 13569000448.0,
+  "dividend_yield": 0.83,
+  "payout_ratio": 0.2601,
+  "market_cap": 359107198976.0
+}

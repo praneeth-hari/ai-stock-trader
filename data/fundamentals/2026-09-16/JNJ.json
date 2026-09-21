@@ -1,0 +1,22 @@
+{
+  "ticker": "JNJ",
+  "fetch_date": "2026-09-16",
+  "trailing_pe": 30.904402,
+  "forward_pe": 21.709808,
+  "peg_ratio": 2.79,
+  "price_to_book": 7.558808,
+  "enterprise_to_ebitda": 19.276,
+  "profit_margins": 0.21482,
+  "operating_margins": 0.2919,
+  "return_on_equity": 0.25742,
+  "return_on_assets": 0.08595,
+  "revenue_growth": 0.066,
+  "earnings_growth": -0.009,
+  "debt_to_equity": 57.709,
+  "current_ratio": 1.089,
+  "free_cash_flow": 16885125120.0,
+  "operating_cash_flow": 27608000512.0,
+  "dividend_yield": 2.01,
+  "payout_ratio": 0.6079,
+  "market_cap": 642731933696.0
+}

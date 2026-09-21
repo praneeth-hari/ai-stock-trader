@@ -1,0 +1,22 @@
+{
+  "ticker": "CVX",
+  "fetch_date": "2026-09-13",
+  "trailing_pe": 20.62235,
+  "forward_pe": 15.889441,
+  "peg_ratio": 0.95,
+  "price_to_book": 2.2113636,
+  "enterprise_to_ebitda": 8.964,
+  "profit_margins": 0.09834,
+  "operating_margins": 0.21866,
+  "return_on_equity": 0.12231,
+  "return_on_assets": 0.05861,
+  "revenue_growth": 0.535,
+  "earnings_growth": 3.219,
+  "debt_to_equity": 18.959,
+  "current_ratio": 1.252,
+  "free_cash_flow": 21934000128.0,
+  "operating_cash_flow": 45320998912.0,
+  "dividend_yield": 3.33,
+  "payout_ratio": 0.6718,
+  "market_cap": 419900817408.0
+}

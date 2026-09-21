@@ -1,0 +1,22 @@
+{
+  "ticker": "NVDA",
+  "fetch_date": "2026-09-15",
+  "trailing_pe": 26.703798,
+  "forward_pe": 13.510182,
+  "peg_ratio": 0.46,
+  "price_to_book": 22.246126,
+  "enterprise_to_ebitda": 25.143,
+  "profit_margins": 0.63663,
+  "operating_margins": 0.66236997,
+  "return_on_equity": 1.17211,
+  "return_on_assets": 0.53572,
+  "revenue_growth": 1.059,
+  "earnings_growth": 1.278,
+  "debt_to_equity": 16.971,
+  "current_ratio": 4.589,
+  "free_cash_flow": 41809874944.0,
+  "operating_cash_flow": 134359998464.0,
+  "dividend_yield": 0.46,
+  "payout_ratio": 0.0354,
+  "market_cap": 5094050889728.0
+}
