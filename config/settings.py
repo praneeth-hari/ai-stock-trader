@@ -197,6 +197,19 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Auto-enabled by repository._probe_db_connection() when the DB is unreachable
+    # (e.g. GitHub Actions IPv6 / Supabase network issues). In stateless mode the
+    # pipeline fetches data, runs AI, makes decisions, and sends Telegram alerts —
+    # but skips all database persistence. Never set this manually; it is runtime-only.
+    stateless_mode: bool = Field(
+        default=False,
+        description=(
+            "When True, all database read/write operations are silently skipped. "
+            "Auto-activated by repository layer on connection failure. "
+            "Pipeline continues: fetch → AI → decisions → Telegram alerts."
+        ),
+    )
+
     # ── Feature engineering ───────────────────────────────────────────────────
     warmup_bars: int = Field(
         default=200,

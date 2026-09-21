@@ -107,6 +107,43 @@ def _assert_safe_write_target() -> None:
 
 _engine = None
 
+# ── Stateless-mode guard ───────────────────────────────────────────────────────
+# When the database is unreachable (e.g. GitHub Actions IPv6/Supabase issue),
+# this flag is flipped to False by _probe_db_connection(). All repository
+# functions then silently no-op / return empty values so the pipeline can
+# continue without a DB: fetch data → run AI → make decisions → Telegram alerts.
+_db_available: bool = True
+
+
+def _probe_db_connection() -> bool:
+    """
+    Attempt a lightweight connection to confirm the database is reachable.
+    Returns True if the DB is available, False otherwise.
+    On failure, sets the module-level _db_available = False and logs a warning.
+    """
+    global _db_available
+    try:
+        engine = get_engine()
+        with engine.connect() as conn:
+            from sqlalchemy import text
+            conn.execute(text("SELECT 1"))
+        _db_available = True
+        return True
+    except Exception as exc:
+        _db_available = False
+        logger.warning(
+            "DATABASE_UNAVAILABLE: Could not connect to database (%s). "
+            "Running in stateless mode — data will NOT be persisted.",
+            exc,
+        )
+        # Propagate to settings so callers can inspect
+        try:
+            settings.stateless_mode = True
+        except Exception:
+            pass
+        return False
+
+
 
 def get_engine(db_url: Optional[str] = None):
     """
@@ -147,46 +184,62 @@ def create_all_tables() -> None:
     """
     Create all tables defined in models.py if they do not already exist.
     Safe to call on every startup — idempotent. Also migrates missing columns.
+    If the database is unreachable, activates stateless mode and returns without crashing.
     """
-    engine = get_engine()
-    Base.metadata.create_all(bind=engine)
+    global _db_available
+    # First check connectivity; bail out gracefully if unreachable
+    if not _probe_db_connection():
+        return
 
-    # Lightweight schema migration for newly added columns
-    from sqlalchemy import inspect, text
-    inspector = inspect(engine)
-    table_names = inspector.get_table_names()
+    try:
+        engine = get_engine()
+        Base.metadata.create_all(bind=engine)
 
-    with engine.connect() as conn:
-        if "market_data" in table_names:
-            cols = {c["name"] for c in inspector.get_columns("market_data")}
-            if "data_as_of" not in cols:
-                conn.execute(text("ALTER TABLE market_data ADD COLUMN data_as_of VARCHAR(30)"))
-                conn.commit()
-                logger.info("Migrated schema: added market_data.data_as_of")
+        # Lightweight schema migration for newly added columns
+        from sqlalchemy import inspect, text
+        inspector = inspect(engine)
+        table_names = inspector.get_table_names()
 
-        if "portfolio" in table_names:
-            cols = {c["name"] for c in inspector.get_columns("portfolio")}
-            if "total_slippage_cost" not in cols:
-                conn.execute(text("ALTER TABLE portfolio ADD COLUMN total_slippage_cost FLOAT DEFAULT 0.0"))
-                conn.commit()
-                logger.info("Migrated schema: added portfolio.total_slippage_cost")
-            if "highest_price_since_entry" not in cols:
-                conn.execute(text("ALTER TABLE portfolio ADD COLUMN highest_price_since_entry FLOAT"))
-                conn.commit()
-                logger.info("Migrated schema: added portfolio.highest_price_since_entry")
-            if "trailing_stop_price" not in cols:
-                conn.execute(text("ALTER TABLE portfolio ADD COLUMN trailing_stop_price FLOAT"))
-                conn.commit()
-                logger.info("Migrated schema: added portfolio.trailing_stop_price")
+        with engine.connect() as conn:
+            if "market_data" in table_names:
+                cols = {c["name"] for c in inspector.get_columns("market_data")}
+                if "data_as_of" not in cols:
+                    conn.execute(text("ALTER TABLE market_data ADD COLUMN data_as_of VARCHAR(30)"))
+                    conn.commit()
+                    logger.info("Migrated schema: added market_data.data_as_of")
 
-        if "trades" in table_names:
-            cols = {c["name"] for c in inspector.get_columns("trades")}
-            if "slippage_cost" not in cols:
-                conn.execute(text("ALTER TABLE trades ADD COLUMN slippage_cost FLOAT DEFAULT 0.0"))
-                conn.commit()
-                logger.info("Migrated schema: added trades.slippage_cost")
+            if "portfolio" in table_names:
+                cols = {c["name"] for c in inspector.get_columns("portfolio")}
+                if "total_slippage_cost" not in cols:
+                    conn.execute(text("ALTER TABLE portfolio ADD COLUMN total_slippage_cost FLOAT DEFAULT 0.0"))
+                    conn.commit()
+                    logger.info("Migrated schema: added portfolio.total_slippage_cost")
+                if "highest_price_since_entry" not in cols:
+                    conn.execute(text("ALTER TABLE portfolio ADD COLUMN highest_price_since_entry FLOAT"))
+                    conn.commit()
+                    logger.info("Migrated schema: added portfolio.highest_price_since_entry")
+                if "trailing_stop_price" not in cols:
+                    conn.execute(text("ALTER TABLE portfolio ADD COLUMN trailing_stop_price FLOAT"))
+                    conn.commit()
+                    logger.info("Migrated schema: added portfolio.trailing_stop_price")
 
-    logger.info("All database tables created/verified.")
+            if "trades" in table_names:
+                cols = {c["name"] for c in inspector.get_columns("trades")}
+                if "slippage_cost" not in cols:
+                    conn.execute(text("ALTER TABLE trades ADD COLUMN slippage_cost FLOAT DEFAULT 0.0"))
+                    conn.commit()
+                    logger.info("Migrated schema: added trades.slippage_cost")
+
+        logger.info("All database tables created/verified.")
+    except Exception as exc:
+        _db_available = False
+        logger.warning(
+            "DATABASE_UNAVAILABLE: Table creation failed (%s). Running in stateless mode.", exc
+        )
+        try:
+            settings.stateless_mode = True
+        except Exception:
+            pass
 
 
 # ── Market data ────────────────────────────────────────────────────────────────
@@ -197,6 +250,7 @@ def save_market_data(df: pd.DataFrame) -> int:
 
     Skips rows that already exist for the same (date, ticker) pair rather
     than raising. Returns the number of rows inserted.
+    In stateless mode (DB unavailable), silently returns 0.
 
     Args:
         df: Validated DataFrame with columns [date, open, high, low, close, volume, ticker].
@@ -204,6 +258,8 @@ def save_market_data(df: pd.DataFrame) -> int:
     Returns:
         Count of rows inserted (existing rows are skipped).
     """
+    if not _db_available:
+        return 0
     _assert_safe_write_target()
     if df.empty:
         return 0
@@ -251,17 +307,13 @@ def get_market_data(
 ) -> pd.DataFrame:
     """
     Retrieve validated OHLCV rows for a ticker, optionally filtered by date range.
-
-    Args:
-        ticker: Uppercase ticker symbol.
-        start_date: Inclusive lower bound 'YYYY-MM-DD' (optional).
-        end_date: Inclusive upper bound 'YYYY-MM-DD' (optional).
-        include_metadata: If True, includes metadata columns such as 'data_as_of'.
-
-    Returns:
-        DataFrame with columns [date, ticker, open, high, low, close, volume]
-        (and data_as_of if include_metadata is True).
+    In stateless mode (DB unavailable), returns an empty DataFrame.
     """
+    if not _db_available:
+        cols = ["date", "ticker", "open", "high", "low", "close", "volume"]
+        if include_metadata:
+            cols.append("data_as_of")
+        return pd.DataFrame(columns=cols)
     with Session(get_engine()) as session:
         stmt = select(MarketDataRow).where(MarketDataRow.ticker == ticker.upper())
         if start_date:
@@ -297,13 +349,10 @@ def get_market_data(
 def save_features(df: pd.DataFrame) -> int:
     """
     Upsert feature vectors into the features table.
-
-    The DataFrame must have 'date' and 'ticker' columns; all other columns
-    are treated as feature values and stored as a JSON blob per row.
-    Existing (date, ticker) rows are overwritten (update on conflict).
-
-    Returns the number of rows upserted.
+    In stateless mode (DB unavailable), silently returns 0.
     """
+    if not _db_available:
+        return 0
     _assert_safe_write_target()
     if df.empty:
         return 0
@@ -345,13 +394,9 @@ def get_features(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
 ) -> pd.DataFrame:
-    """
-    Retrieve feature vectors for a ticker, expanding the JSON blob back
-    into individual columns.
-
-    Returns:
-        DataFrame with columns [date, ticker, <feature_name>, ...].
-    """
+    """Retrieve feature vectors for a ticker. Returns empty DataFrame in stateless mode."""
+    if not _db_available:
+        return pd.DataFrame(columns=["date", "ticker"])
     with Session(get_engine()) as session:
         stmt = select(FeatureRow).where(FeatureRow.ticker == ticker.upper())
         if start_date:
@@ -378,12 +423,10 @@ def get_features(
 def save_predictions(df: pd.DataFrame) -> int:
     """
     Upsert model probability predictions into the predictions table.
-
-    DataFrame must have: date, ticker, probability. Optionally: model_version.
-    Existing (date, ticker, model_version) rows are overwritten.
-
-    Returns upserted row count.
+    In stateless mode (DB unavailable), silently returns 0.
     """
+    if not _db_available:
+        return 0
     _assert_safe_write_target()
     if df.empty:
         return 0
@@ -427,7 +470,9 @@ def get_predictions(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
 ) -> pd.DataFrame:
-    """Returns predictions for a ticker as a DataFrame."""
+    """Returns predictions for a ticker as a DataFrame. Returns empty in stateless mode."""
+    if not _db_available:
+        return pd.DataFrame(columns=["date", "ticker", "probability", "model_version"])
     with Session(get_engine()) as session:
         stmt = select(PredictionRow).where(PredictionRow.ticker == ticker.upper())
         if start_date:
@@ -455,16 +500,9 @@ def save_portfolio_snapshot(
     positions: Optional[Dict[str, Any]] = None,
     total_slippage_cost: float = 0.0,
 ) -> None:
-    """
-    Upsert a portfolio snapshot for a given run date.
-
-    Args:
-        run_date: 'YYYY-MM-DD' string.
-        cash: Current uninvested cash balance.
-        total_value: Total portfolio value (cash + positions).
-        positions: Dict of {ticker: {quantity, avg_cost, current_price, value}}.
-        total_slippage_cost: Cumulative market-impact slippage incurred (Item 15).
-    """
+    """Upsert a portfolio snapshot. Silently skips in stateless mode (DB unavailable)."""
+    if not _db_available:
+        return
     _assert_safe_write_target()
     with Session(get_engine()) as session:
         existing = session.execute(
@@ -491,7 +529,9 @@ def save_portfolio_snapshot(
 
 
 def get_portfolio_snapshot(run_date: str) -> Optional[Dict[str, Any]]:
-    """Returns the portfolio snapshot for a specific run date, or None."""
+    """Returns the portfolio snapshot for a specific run date, or None. Returns None in stateless mode."""
+    if not _db_available:
+        return None
     with Session(get_engine()) as session:
         row = session.execute(
             select(PortfolioSnapshot).where(PortfolioSnapshot.run_date == run_date)
@@ -508,7 +548,9 @@ def get_portfolio_snapshot(run_date: str) -> Optional[Dict[str, Any]]:
 
 
 def get_latest_portfolio_snapshot() -> Optional[Dict[str, Any]]:
-    """Returns the most recent portfolio snapshot by run_date, or None."""
+    """Returns the most recent portfolio snapshot by run_date, or None. Returns None in stateless mode."""
+    if not _db_available:
+        return None
     with Session(get_engine()) as session:
         row = session.execute(
             select(PortfolioSnapshot).order_by(PortfolioSnapshot.run_date.desc()).limit(1)
@@ -525,7 +567,9 @@ def get_latest_portfolio_snapshot() -> Optional[Dict[str, Any]]:
 
 
 def get_portfolio_snapshots(limit: int = 500) -> List[Dict[str, Any]]:
-    """Returns portfolio snapshots ordered chronologically (for equity curve)."""
+    """Returns portfolio snapshots ordered chronologically. Returns empty list in stateless mode."""
+    if not _db_available:
+        return []
     with Session(get_engine()) as session:
         rows = session.execute(
             select(PortfolioSnapshot).order_by(PortfolioSnapshot.run_date.asc()).limit(limit)
@@ -549,13 +593,9 @@ def save_order(
     price: float,
     reason: str,
 ) -> int:
-    """
-    Append an order decision record. Returns the new row id.
-
-    Args:
-        action: 'BUY', 'SELL', or 'HOLD'.
-        reason: Human-readable explanation of which rule triggered this order.
-    """
+    """Append an order decision record. Returns 0 in stateless mode (DB unavailable)."""
+    if not _db_available:
+        return 0
     _assert_safe_write_target()
     with Session(get_engine()) as session:
         row = OrderRow(
@@ -576,7 +616,9 @@ def save_order(
 
 
 def get_orders(run_date: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
-    """Returns orders for a given run date, or the most recent orders if run_date is None."""
+    """Returns orders for a given run date. Returns empty list in stateless mode."""
+    if not _db_available:
+        return []
     with Session(get_engine()) as session:
         stmt = select(OrderRow)
         if run_date is not None:
@@ -603,14 +645,9 @@ def save_trade(
     net_pnl: float,
     slippage_cost: float = 0.0,
 ) -> int:
-    """
-    Record a simulated paper-broker fill. Returns new row id.
-
-    Args:
-        cost:          0.2% of (fill_price * quantity) — always applied (§1.6).
-        net_pnl:       Realized P&L after costs for sells; 0.0 for buys.
-        slippage_cost: Simulated market impact slippage cost ($) based on ADV tier.
-    """
+    """Record a simulated paper-broker fill. Returns 0 in stateless mode (DB unavailable)."""
+    if not _db_available:
+        return 0
     _assert_safe_write_target()
     with Session(get_engine()) as session:
         row = TradeRow(
@@ -636,7 +673,9 @@ def save_trade(
 
 
 def get_trades(run_date: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
-    """Returns trades for a given run date, or the most recent trades if run_date is None."""
+    """Returns trades for a given run date. Returns empty list in stateless mode."""
+    if not _db_available:
+        return []
     with Session(get_engine()) as session:
         stmt = select(TradeRow)
         if run_date is not None:
@@ -662,25 +701,24 @@ def log_event(
 ) -> None:
     """
     Write a structured event to the audit log table.
-
-    Satisfies CLAUDE.md rule 8: 'log everything'. Use this for every
-    prediction, decision, skip, and error that should be persistent
-    (in addition to the Python logger which writes to stderr/files).
-
-    Args:
-        level:     'DEBUG', 'INFO', 'WARNING', 'ERROR', or 'CRITICAL'.
-        component: Which engine emitted this (e.g. 'validation', 'risk_engine').
-        message:   Human-readable description.
-        details:   Optional structured metadata dict.
+    In stateless mode (DB unavailable), falls back to Python logger only — never crashes.
     """
-    with Session(get_engine()) as session:
-        session.add(EventLog(
-            level=level.upper(),
-            component=component,
-            message=message,
-            details=details,
-        ))
-        session.commit()
+    if not _db_available:
+        # Degrade gracefully: emit to Python logger instead of crashing
+        logger.info("[STATELESS EVENT] [%s] %s: %s", level.upper(), component, message)
+        return
+    try:
+        with Session(get_engine()) as session:
+            session.add(EventLog(
+                level=level.upper(),
+                component=component,
+                message=message,
+                details=details,
+            ))
+            session.commit()
+    except Exception as exc:
+        logger.warning("log_event: DB write failed (%s) — logging to stderr only.", exc)
+        logger.info("[FALLBACK EVENT] [%s] %s: %s", level.upper(), component, message)
 
 
 def get_events(
@@ -688,14 +726,9 @@ def get_events(
     component: Optional[str] = None,
     limit: int = 100,
 ) -> List[Dict[str, Any]]:
-    """
-    Retrieve recent event log entries, newest first.
-
-    Args:
-        level:     Optional filter by log level (e.g. 'ERROR').
-        component: Optional filter by component name.
-        limit:     Maximum rows to return.
-    """
+    """Retrieve recent event log entries, newest first. Returns empty list in stateless mode."""
+    if not _db_available:
+        return []
     with Session(get_engine()) as session:
         stmt = select(EventLog).order_by(EventLog.timestamp.desc()).limit(limit)
         if level:
@@ -716,7 +749,9 @@ def get_events(
 # ── Section 5: Intelligence Persistence ───────────────────────────────────────
 
 def save_sentiment_scores(scores: List[Dict[str, Any]]) -> int:
-    """Save headline sentiment scores per (ticker, date). Returns count saved."""
+    """Save headline sentiment scores per (ticker, date). Returns 0 in stateless mode."""
+    if not _db_available:
+        return 0
     _assert_safe_write_target()
     if not scores:
         return 0
@@ -737,7 +772,9 @@ def save_sentiment_scores(scores: List[Dict[str, Any]]) -> int:
 
 
 def get_latest_sentiment_scores(as_of_date: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
-    """Retrieve latest sentiment scores for each ticker on or before as_of_date."""
+    """Retrieve latest sentiment scores for each ticker. Returns {} in stateless mode."""
+    if not _db_available:
+        return {}
     with Session(get_engine()) as session:
         stmt = select(SentimentScoreRow).order_by(SentimentScoreRow.date.desc(), SentimentScoreRow.id.desc())
         if as_of_date:
@@ -758,7 +795,9 @@ def get_latest_sentiment_scores(as_of_date: Optional[str] = None) -> Dict[str, D
 
 
 def save_earnings_calendar(events: List[Dict[str, Any]]) -> int:
-    """Save upcoming earnings dates per ticker. Returns count saved."""
+    """Save upcoming earnings dates per ticker. Returns 0 in stateless mode."""
+    if not _db_available:
+        return 0
     _assert_safe_write_target()
     if not events:
         return 0
@@ -777,7 +816,9 @@ def save_earnings_calendar(events: List[Dict[str, Any]]) -> int:
 
 
 def get_latest_earnings_calendar(as_of_date: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
-    """Retrieve latest earnings record per ticker on or before as_of_date."""
+    """Retrieve latest earnings record per ticker. Returns {} in stateless mode."""
+    if not _db_available:
+        return {}
     with Session(get_engine()) as session:
         stmt = select(EarningsCalendarRow).order_by(EarningsCalendarRow.fetched_date.desc(), EarningsCalendarRow.id.desc())
         if as_of_date:
@@ -796,7 +837,9 @@ def get_latest_earnings_calendar(as_of_date: Optional[str] = None) -> Dict[str, 
 
 
 def save_sector_rankings(rankings: List[Dict[str, Any]]) -> int:
-    """Save daily 20-day return ranking for all sectors."""
+    """Save daily 20-day return ranking for all sectors. Returns 0 in stateless mode."""
+    if not _db_available:
+        return 0
     _assert_safe_write_target()
     if not rankings:
         return 0
@@ -816,7 +859,9 @@ def save_sector_rankings(rankings: List[Dict[str, Any]]) -> int:
 
 
 def get_latest_sector_rankings(as_of_date: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Retrieve the latest sector rankings."""
+    """Retrieve the latest sector rankings. Returns [] in stateless mode."""
+    if not _db_available:
+        return []
     with Session(get_engine()) as session:
         stmt = select(SectorRankingRow).order_by(SectorRankingRow.date.desc(), SectorRankingRow.rank.asc())
         if as_of_date:
@@ -838,7 +883,9 @@ def get_latest_sector_rankings(as_of_date: Optional[str] = None) -> List[Dict[st
 
 
 def save_macro_indicators(ind: Dict[str, Any]) -> None:
-    """Save macroeconomic indicators & regime score."""
+    """Save macroeconomic indicators & regime score. No-op in stateless mode."""
+    if not _db_available:
+        return
     _assert_safe_write_target()
     with Session(get_engine()) as session:
         session.add(MacroIndicatorRow(
@@ -854,7 +901,9 @@ def save_macro_indicators(ind: Dict[str, Any]) -> None:
 
 
 def get_latest_macro_indicators(as_of_date: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    """Retrieve the latest macroeconomic indicator snapshot."""
+    """Retrieve the latest macroeconomic indicator snapshot. Returns None in stateless mode."""
+    if not _db_available:
+        return None
     with Session(get_engine()) as session:
         stmt = select(MacroIndicatorRow).order_by(MacroIndicatorRow.date.desc(), MacroIndicatorRow.id.desc())
         if as_of_date:
@@ -874,9 +923,9 @@ def get_latest_macro_indicators(as_of_date: Optional[str] = None) -> Optional[Di
 
 
 def save_correlation_matrix(records: List[Dict[str, Any]]) -> int:
-    """
-    Saves pairwise correlation matrix entries into correlation_matrix table.
-    """
+    """Saves pairwise correlation matrix entries. Returns 0 in stateless mode."""
+    if not _db_available:
+        return 0
     _assert_safe_write_target()
     if not records:
         return 0
@@ -914,9 +963,9 @@ def save_correlation_matrix(records: List[Dict[str, Any]]) -> int:
 
 
 def get_correlation_matrix(date_str: Optional[str] = None) -> List[Dict[str, Any]]:
-    """
-    Retrieves pairwise correlation matrix entries for a given date (or latest date).
-    """
+    """Retrieves pairwise correlation matrix entries. Returns [] in stateless mode."""
+    if not _db_available:
+        return []
     with Session(get_engine()) as session:
         if date_str is None:
             latest_row = session.execute(
@@ -942,17 +991,9 @@ def get_correlation_matrix(date_str: Optional[str] = None) -> List[Dict[str, Any
 # ── Feature Importance (Section 9 Item 2) ─────────────────────────────────────
 
 def save_feature_importances(date_str: str, model_type: str, importances: Dict[str, float]) -> int:
-    """
-    Upsert feature importance scores for one model training run.
-
-    Parameters
-    ----------
-    date_str : str   — ISO date of the retrain (YYYY-MM-DD).
-    model_type : str — e.g. 'primary', 'xgboost', 'baseline', 'ensemble'.
-    importances : dict — {feature_name: importance_score}.
-
-    Returns number of rows written.
-    """
+    """Upsert feature importance scores. Returns 0 in stateless mode."""
+    if not _db_available:
+        return 0
     _assert_safe_write_target()
     if not importances:
         return 0
@@ -989,11 +1030,9 @@ def save_feature_importances(date_str: str, model_type: str, importances: Dict[s
 
 
 def get_feature_importances(model_type: str, date_str: Optional[str] = None) -> List[Dict[str, Any]]:
-    """
-    Load feature importance scores for the most recent retrain (or a specific date).
-
-    Returns list of {feature_name, importance_score, date, model_type} sorted by importance descending.
-    """
+    """Load feature importance scores. Returns [] in stateless mode."""
+    if not _db_available:
+        return []
     with Session(get_engine()) as session:
         q = select(FeatureImportanceRow).where(FeatureImportanceRow.model_type == model_type)
         if date_str:
@@ -1027,11 +1066,9 @@ def get_feature_importance_history(
     top_n_features: int = 5,
     last_n_retrains: int = 5,
 ) -> List[Dict[str, Any]]:
-    """
-    Return feature importance time-series for the top N features across the last N retrains.
-
-    Returns list of {date, feature_name, importance_score, model_type}.
-    """
+    """Return feature importance time-series. Returns [] in stateless mode."""
+    if not _db_available:
+        return []
     with Session(get_engine()) as session:
         # Get distinct dates for this model_type, most recent first
         dates_q = (
@@ -1087,7 +1124,9 @@ def save_strategy_variant(
     starting_capital: float = 10000.0,
     created_date: Optional[str] = None,
 ) -> int:
-    """Save or return existing strategy variant row by name."""
+    """Save or return existing strategy variant row by name. Returns 0 in stateless mode."""
+    if not _db_available:
+        return 0
     _assert_safe_write_target()
     today_str = created_date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
     with Session(get_engine()) as session:
@@ -1110,7 +1149,9 @@ def save_strategy_variant(
 
 
 def get_strategy_variants(only_active: bool = True) -> List[Dict[str, Any]]:
-    """Return all saved strategy variants."""
+    """Return all saved strategy variants. Returns [] in stateless mode."""
+    if not _db_available:
+        return []
     with Session(get_engine()) as session:
         stmt = select(StrategyVariantRow)
         if only_active:
@@ -1138,7 +1179,9 @@ def save_strategy_snapshot(
     positions: Dict[str, Any],
     daily_return: float = 0.0,
 ) -> int:
-    """Save a daily snapshot for a strategy variant."""
+    """Save a daily snapshot for a strategy variant. Returns 0 in stateless mode."""
+    if not _db_available:
+        return 0
     _assert_safe_write_target()
     with Session(get_engine()) as session:
         row = StrategySnapshotRow(
@@ -1156,7 +1199,9 @@ def save_strategy_snapshot(
 
 
 def get_strategy_snapshots(strategy_id: Optional[int] = None) -> List[Dict[str, Any]]:
-    """Query portfolio snapshots for a strategy (or all strategies)."""
+    """Query portfolio snapshots for a strategy. Returns [] in stateless mode."""
+    if not _db_available:
+        return []
     with Session(get_engine()) as session:
         stmt = select(StrategySnapshotRow)
         if strategy_id is not None:
@@ -1186,7 +1231,9 @@ def save_strategy_trade(
     shares: float,
     pnl: float = 0.0,
 ) -> int:
-    """Record an executed trade for a strategy variant."""
+    """Record an executed trade for a strategy variant. Returns 0 in stateless mode."""
+    if not _db_available:
+        return 0
     _assert_safe_write_target()
     with Session(get_engine()) as session:
         row = StrategyTradeRow(
@@ -1205,7 +1252,9 @@ def save_strategy_trade(
 
 
 def get_strategy_trades(strategy_id: Optional[int] = None) -> List[Dict[str, Any]]:
-    """Query executed trades for a strategy (or all strategies)."""
+    """Query executed trades for a strategy. Returns [] in stateless mode."""
+    if not _db_available:
+        return []
     with Session(get_engine()) as session:
         stmt = select(StrategyTradeRow)
         if strategy_id is not None:
