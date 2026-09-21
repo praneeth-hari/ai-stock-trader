@@ -283,7 +283,31 @@ st.title("📈 AI Stock Trader — Operator Monitoring Dashboard")
 st.markdown("Automated algorithmic trading system running daily paper cycles with strict capital preservation rules.")
 
 # Pull live data
-port = get_portfolio_summary()
+try:
+    portfolio = get_portfolio_summary()
+except Exception:
+    portfolio = None
+
+if portfolio is None:
+    st.warning("⚠️ Database not connected. Showing demo mode.")
+    port = {
+        "run_date": None,
+        "cash": float(settings.initial_capital),
+        "total_equity": float(settings.initial_capital),
+        "invested_value": 0.0,
+        "total_slippage_cost": 0.0,
+        "cash_reserve_pct": 100.0,
+        "open_positions_count": 0,
+        "max_positions": settings.max_positions,
+        "unrealized_pnl_total": 0.0,
+        "positions": [],
+        "last_run_status": "STATELSS_MODE",
+        "last_run_message": "Database not connected",
+        "last_run_timestamp": None,
+    }
+else:
+    port = portfolio
+
 equity_df = get_equity_history_df()
 trades_df = get_recent_trades_df(limit=50)
 orders_df = get_recent_orders_df(limit=50)

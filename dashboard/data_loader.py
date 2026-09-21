@@ -32,7 +32,12 @@ def get_last_pipeline_status() -> Dict[str, Any]:
             "run_date": Optional[str],
         }
     """
-    events = repository.get_events(limit=30)
+    try:
+        events = repository.get_events(limit=30)
+    except Exception as exc:
+        logger.warning("DB connection error in get_last_pipeline_status: %s", exc)
+        return {"status": "NO_RUNS", "message": "Database disconnected", "timestamp": None}
+
     for e in events:
         comp = str(e.get("component", ""))
         msg = str(e.get("message", ""))
@@ -52,15 +57,23 @@ def get_last_pipeline_status() -> Dict[str, Any]:
     return {"status": "NO_RUNS", "message": "No pipeline runs recorded", "timestamp": None}
 
 
-def get_portfolio_summary() -> Dict[str, Any]:
+def get_portfolio_summary() -> Optional[Dict[str, Any]]:
     """
     Returns current portfolio snapshot and derived risk metrics.
 
-    Fallback: If no snapshot has been recorded yet, initializes with
-    settings.initial_capital and zero open positions.
+    Fallback: If database is disconnected or snapshot read fails,
+    returns None so UI can render demo mode notice.
     """
-    snap = repository.get_latest_portfolio_snapshot()
-    last_status = get_last_pipeline_status()
+    try:
+        snap = repository.get_latest_portfolio_snapshot()
+    except Exception as exc:
+        logger.warning("DB connection error in get_portfolio_summary: %s", exc)
+        return None
+
+    try:
+        last_status = get_last_pipeline_status()
+    except Exception:
+        last_status = {"status": "NO_RUNS", "message": "Database disconnected", "timestamp": None}
 
     if snap is None:
         cash = float(settings.initial_capital)
@@ -150,7 +163,12 @@ def get_equity_history_df() -> pd.DataFrame:
     """
     Returns historical daily portfolio snapshots formatted as a time-series DataFrame.
     """
-    snapshots = repository.get_portfolio_snapshots(limit=500)
+    try:
+        snapshots = repository.get_portfolio_snapshots(limit=500)
+    except Exception as exc:
+        logger.warning("DB connection error in get_equity_history_df: %s", exc)
+        snapshots = []
+
     if not snapshots:
         # Default single point with initial capital
         today_str = date.today().strftime("%Y-%m-%d")
@@ -182,7 +200,12 @@ def get_recent_trades_df(limit: int = 50) -> pd.DataFrame:
     """
     Returns recent executed trades from DB.
     """
-    trades = repository.get_trades(run_date=None, limit=limit)
+    try:
+        trades = repository.get_trades(run_date=None, limit=limit)
+    except Exception as exc:
+        logger.warning("DB connection error in get_recent_trades_df: %s", exc)
+        trades = []
+
     if not trades:
         return pd.DataFrame(columns=["date", "ticker", "action", "shares", "price", "fee", "net_pnl"])
 
@@ -205,7 +228,12 @@ def get_recent_orders_df(limit: int = 50) -> pd.DataFrame:
     """
     Returns recent order decisions from DB.
     """
-    orders = repository.get_orders(run_date=None, limit=limit)
+    try:
+        orders = repository.get_orders(run_date=None, limit=limit)
+    except Exception as exc:
+        logger.warning("DB connection error in get_recent_orders_df: %s", exc)
+        orders = []
+
     if not orders:
         return pd.DataFrame(columns=["date", "ticker", "action", "shares", "price", "reason"])
 
@@ -231,7 +259,12 @@ def get_system_events_df(limit: int = 100) -> pd.DataFrame:
     """
     Returns system audit and pipeline events.
     """
-    events = repository.get_events(limit=limit)
+    try:
+        events = repository.get_events(limit=limit)
+    except Exception as exc:
+        logger.warning("DB connection error in get_system_events_df: %s", exc)
+        events = []
+
     if not events:
         return pd.DataFrame(columns=["timestamp", "level", "component", "message"])
 
