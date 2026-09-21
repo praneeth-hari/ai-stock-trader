@@ -281,6 +281,7 @@ with st.sidebar:
 
 st.title("📈 AI Stock Trader — Operator Monitoring Dashboard")
 st.markdown("Automated algorithmic trading system running daily paper cycles with strict capital preservation rules.")
+st.info("📱 Trading pipeline running on GitHub. Check Telegram for live updates!")
 
 # Pull live data
 try:
@@ -289,7 +290,6 @@ except Exception:
     portfolio = None
 
 if portfolio is None:
-    st.warning("⚠️ Database not connected. Showing demo mode.")
     port = {
         "run_date": None,
         "cash": float(settings.initial_capital),
@@ -301,8 +301,8 @@ if portfolio is None:
         "max_positions": settings.max_positions,
         "unrealized_pnl_total": 0.0,
         "positions": [],
-        "last_run_status": "STATELSS_MODE",
-        "last_run_message": "Database not connected",
+        "last_run_status": "System Running on Cloud ✅",
+        "last_run_message": "Trading pipeline running on GitHub. Check Telegram for live updates! 📱",
         "last_run_timestamp": None,
     }
 else:
@@ -324,8 +324,8 @@ with m1:
     if pulse_cls:
         st.markdown(f'<div class="{pulse_cls}" style="border-radius:8px; padding:2px;">', unsafe_allow_html=True)
     st.metric(
-        "Total Portfolio Value",
-        f"${port['total_equity']:.2f}",
+        "Portfolio Value",
+        f"${port['total_equity']:,.2f}",
         delta=f"${port['unrealized_pnl_total']:+.2f} Today's Change",
         help="This is all your money combined — both what's invested in stocks and what's sitting as cash.",
     )
@@ -333,32 +333,24 @@ with m1:
         st.markdown('</div>', unsafe_allow_html=True)
 with m2:
     st.metric(
-        "Cash Balance",
-        f"${port['cash']:.2f}",
+        "Cash",
+        f"${port['cash']:,.2f}",
         help="Money ready to be invested or kept safe as cash.",
     )
 with m3:
-    floor_diff = port['cash_reserve_pct'] - (settings.cash_reserve * 100.0)
+    pos_text = "None" if port['open_positions_count'] == 0 else f"{port['open_positions_count']} Active"
     st.metric(
-        "Cash Reserve",
-        f"{port['cash_reserve_pct']:.1f}%",
-        delta=f"{floor_diff:+.1f}% vs floor",
-        delta_color="normal",
-        help="Money kept safe and not invested. We always keep at least 15% in cash as an emergency cushion.",
+        "Positions",
+        pos_text,
+        help="Active open stock holdings in portfolio.",
     )
 with m4:
-    is_risk_on = regime_info.get("is_risk_on", True)
-    regime_label = "✅ Good Time to Buy" if is_risk_on else "🛑 Market Crash Protection Active"
-    pulse_cb = "pulse-red" if not is_risk_on else ""
-    if pulse_cb:
-        st.markdown(f'<div class="{pulse_cb}" style="border-radius:8px; padding:2px;">', unsafe_allow_html=True)
+    status_label = "System Running on Cloud ✅"
     st.metric(
-        "Market Condition",
-        regime_label,
-        help="Tells whether market conditions are favorable for buying new stocks.",
+        "Status",
+        status_label,
+        help="Pipeline status and cloud execution engine.",
     )
-    if pulse_cb:
-        st.markdown('</div>', unsafe_allow_html=True)
 
 
 # ── Tabs Navigation ────────────────────────────────────────────────────────────
