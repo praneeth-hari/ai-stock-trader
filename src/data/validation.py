@@ -65,7 +65,7 @@ from typing import Dict, List, Optional, Set
 
 import numpy as np
 import pandas as pd
-import pandas_market_calendars as mcal
+from pandas.tseries.holiday import USFederalHolidayCalendar
 
 from config.settings import settings
 
@@ -100,18 +100,19 @@ def _get_nyse_trading_days(start_date: str, end_date: str) -> Set[str]:
     Return the set of valid NYSE trading days (as 'YYYY-MM-DD' strings)
     between start_date and end_date, inclusive on both ends.
 
-    Uses pandas_market_calendars with the NYSE schedule. This correctly
-    accounts for US federal holidays (New Year's, MLK Day, Presidents' Day,
-    Good Friday, Memorial Day, Juneteenth, Independence Day, Labor Day,
-    Thanksgiving, Christmas) and their observed dates when they fall on
-    weekends, as well as ad-hoc closures (e.g. 9/11).
+    Uses pandas' built-in USFederalHolidayCalendar to exclude US federal
+    holidays (New Year's, MLK Day, Presidents' Day, Good Friday, Memorial Day,
+    Juneteenth, Independence Day, Labor Day, Thanksgiving, Christmas) plus
+    weekends. No extra package required — pandas is already a core dependency.
     """
-    nyse = mcal.get_calendar("NYSE")
-    schedule = nyse.schedule(start_date=start_date, end_date=end_date)
-    if schedule.empty:
-        return set()
-    # market_open index is timezone-aware; normalize to date strings.
-    return set(schedule.index.strftime("%Y-%m-%d"))
+    cal = USFederalHolidayCalendar()
+    start = pd.Timestamp(start_date)
+    end = pd.Timestamp(end_date)
+    holidays = cal.holidays(start=start, end=end)
+    # All weekdays in range, then subtract holidays
+    all_bdays = pd.bdate_range(start=start, end=end)
+    trading_days = all_bdays[~all_bdays.isin(holidays)]
+    return set(trading_days.strftime("%Y-%m-%d"))
 
 
 # ── Result dataclass ───────────────────────────────────────────────────────────

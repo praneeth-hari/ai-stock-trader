@@ -15,9 +15,7 @@ jobs:
       with:
         python-version: '3.11'
     - name: Install dependencies
-      run: |
-        pip install -r requirements.txt
-        pip install pandas-market-calendars>=4.1.4
+      run: pip install -r requirements.txt
     - name: Retrain AI model
       env:
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
