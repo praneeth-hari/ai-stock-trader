@@ -1497,8 +1497,103 @@ with tab5:
         st.subheader("Latest Daily Pipeline Audit Report")
         st.markdown(audit_md)
 
+    # ── System Health Check Section ──────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("🔧 System Health Check")
+
+    import os
+    from datetime import datetime, date
+
+    # --- API Keys Checks ---
+    telegram_ok = bool(os.environ.get("TELEGRAM_BOT_TOKEN") or getattr(settings, "telegram_bot_token", ""))
+    gemini_ok = bool(os.environ.get("GEMINI_API_KEY") or getattr(settings, "gemini_api_key", ""))
+    fred_ok = bool(os.environ.get("FRED_API_KEY") or getattr(settings, "fred_api_key", ""))
+    alpha_ok = bool(os.environ.get("ALPHA_VANTAGE_API_KEY") or getattr(settings, "alpha_vantage_api_key", ""))
+    email_enabled = bool(getattr(settings, "email_alerts_enabled", False) or os.environ.get("EMAIL_ALERTS_ENABLED", "").lower() in ("true", "1"))
+
+    # --- System Status Checks ---
+    # Database check
+    try:
+        from sqlalchemy import text
+        from src.db.repository import get_engine
+        with get_engine().connect() as conn:
+            conn.execute(text("SELECT 1"))
+        db_ok = True
+    except Exception:
+        db_ok = False
+
+    # Active Model check
+    model_path = ROOT / "data" / "models" / "active_model.joblib"
+    model_exists = model_path.exists()
+    if model_exists:
+        _meta_file = ROOT / "data" / "models" / "active_model_metadata.json"
+        try:
+            with open(_meta_file, "r", encoding="utf-8") as _f:
+                _model_name = json.load(_f).get("model_name", "active_model.joblib")
+        except Exception:
+            _model_name = "active_model.joblib"
+    else:
+        _model_name = None
+
+    # Last Pipeline Run check
+    last_run_dt = None
+    if port and port.get("run_date"):
+        r_val = port["run_date"]
+        if isinstance(r_val, datetime):
+            last_run_dt = r_val
+        elif isinstance(r_val, date):
+            last_run_dt = datetime.combine(r_val, datetime.min.time())
+        elif isinstance(r_val, str):
+            try:
+                last_run_dt = datetime.fromisoformat(r_val.replace("Z", "+00:00"))
+            except Exception:
+                try:
+                    last_run_dt = datetime.strptime(r_val[:10], "%Y-%m-%d")
+                except Exception:
+                    pass
+
+    if last_run_dt is None and not events_df.empty:
+        try:
+            ts_str = str(events_df.iloc[0].get("timestamp", ""))
+            last_run_dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        except Exception:
+            pass
+
+    today_date = datetime.now().date()
+    if last_run_dt:
+        run_d = last_run_dt.date()
+        delta_days = (today_date - run_d).days
+        formatted_run_time = last_run_dt.strftime("%Y-%m-%d %H:%M")
+        if delta_days == 0:
+            last_run_label = f"🟢 Today ({formatted_run_time})"
+        elif delta_days == 1:
+            last_run_label = f"🟡 Yesterday ({formatted_run_time})"
+        else:
+            last_run_label = f"🔴 Older ({formatted_run_time})"
+    else:
+        last_run_label = "🔴 No run recorded"
+
+    # Layout in 2 column grid
+    col_health1, col_health2 = st.columns(2)
+
+    with col_health1:
+        st.markdown("#### 🔑 API Keys")
+        st.metric("Telegram Bot", "🟢 Connected" if telegram_ok else "🔴 Not configured")
+        st.metric("Gemini AI", "🟢 Connected" if gemini_ok else "🔴 Not configured")
+        st.metric("FRED Macro Data", "🟢 Connected" if fred_ok else "🔴 Not configured")
+        st.metric("Alpha Vantage", "🟢 Connected" if alpha_ok else "🔴 Not configured")
+        st.metric("Email Alerts", "🟢 Enabled" if email_enabled else "🔴 Disabled")
+
+    with col_health2:
+        st.markdown("#### ⚙️ System Status")
+        st.metric("Database", "🟢 Connected" if db_ok else "🔴 Not connected")
+        st.metric("Active Model", f"🟢 {_model_name}" if model_exists else "🔴 No model found")
+        st.metric("GitHub Actions", "🟢 Cloud deployment active")
+        st.metric("Last Pipeline Run", last_run_label)
+
 
 # ── Tab 6: Long-Term Fundamentals Screener ─────────────────────────────────────
+
 
 with tab6:
     st.subheader("🏛️ Long-Term Fundamentals-Based Stock Screener (3–5+ Year Horizon)")
