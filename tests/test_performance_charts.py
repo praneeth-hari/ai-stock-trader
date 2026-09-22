@@ -319,3 +319,37 @@ def test_13_performance_tab_renders_in_app(clean_db):
         # Confirm tab header exists
         tab_titles = [t.label for t in at.tabs]
         assert any("Performance" in t for t in tab_titles), f"Performance tab not found in tabs: {tab_titles}"
+
+
+def test_14_performance_metrics_calculation(clean_db):
+    """Verifies calculation of Sharpe Ratio, Max Drawdown, Calmar Ratio, Sortino Ratio, Win Rate %, and Profit Factor."""
+    from dashboard.data_loader import get_performance_metrics_data
+
+    # Empty DB default check
+    m_empty = get_performance_metrics_data()
+    assert m_empty["sharpe_ratio"] == 0.0
+    assert m_empty["max_drawdown_pct"] == 0.0
+    assert m_empty["calmar_ratio"] == 0.0
+    assert m_empty["sortino_ratio"] == 0.0
+    assert m_empty["win_rate_pct"] == 0.0
+    assert m_empty["profit_factor"] == 0.0
+
+    # Seed equity snapshots with a growth trajectory
+    dates = ["2026-09-01", "2026-09-02", "2026-09-03", "2026-09-04", "2026-09-05"]
+    vals = [10000.0, 10200.0, 10100.0, 10400.0, 10500.0]
+    for d, v in zip(dates, vals):
+        repository.save_portfolio_snapshot(run_date=d, cash=v * 0.5, total_value=v)
+
+    # Seed trades
+    repository.save_trade("2026-09-01", "AAPL", "BUY", 10.0, 150.0, 1500.0, net_pnl=0.0)
+    repository.save_trade("2026-09-03", "AAPL", "SELL", 10.0, 170.0, 1700.0, net_pnl=200.0)
+    repository.save_trade("2026-09-02", "MSFT", "BUY", 5.0, 300.0, 1500.0, net_pnl=0.0)
+    repository.save_trade("2026-09-04", "MSFT", "SELL", 5.0, 290.0, 1450.0, net_pnl=-50.0)
+
+    m = get_performance_metrics_data()
+    assert m["sharpe_ratio"] > 0
+    assert m["max_drawdown_pct"] > 0
+    assert m["sortino_ratio"] > 0
+    assert m["win_rate_pct"] == 50.0  # 1 win / 1 loss
+    assert m["profit_factor"] == pytest.approx(4.0, abs=0.1)  # 200 / 50
+

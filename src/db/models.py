@@ -453,3 +453,33 @@ class StrategyTradeRow(Base):
 
     def __repr__(self) -> str:
         return f"<StrategyTradeRow strat={self.strategy_id} {self.date} {self.action} {self.ticker}>"
+
+
+class WalkForwardResultRow(Base):
+    """
+    Stores fold-level walk-forward validation results across retrains.
+    """
+    __tablename__ = "walk_forward_results"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    trained_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    model_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    fold_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    train_start: Mapped[str] = mapped_column(String(10), nullable=False)
+    train_end: Mapped[str] = mapped_column(String(10), nullable=False)
+    test_start: Mapped[str] = mapped_column(String(10), nullable=False)
+    test_end: Mapped[str] = mapped_column(String(10), nullable=False)
+    accuracy: Mapped[float] = mapped_column(Float, nullable=False)
+    roc_auc: Mapped[float] = mapped_column(Float, nullable=False)
+    brier_score: Mapped[float] = mapped_column(Float, nullable=False)
+    n_samples: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    __table_args__ = (
+        Index("ix_walk_forward_model_fold", "model_type", "fold_number"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<WalkForwardResultRow model={self.model_type} fold={self.fold_number} roc_auc={self.roc_auc:.4f}>"
+

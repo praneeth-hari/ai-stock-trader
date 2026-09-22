@@ -673,7 +673,31 @@ def train_walk_forward(
         "Walk-forward validation (%s): %d folds, Mean Acc=%.4f, Mean AUC=%.4f, Mean Brier=%.4f",
         model_type, len(fold_metrics), mean_acc, mean_auc, mean_brier,
     )
+
+    # Persist fold metrics to database
+    try:
+        from src.db import repository
+        db_records = [
+            {
+                "model_type": model_type,
+                "fold_number": f.fold_index,
+                "train_start": f.train_start,
+                "train_end": f.train_end,
+                "test_start": f.test_start,
+                "test_end": f.test_end,
+                "accuracy": fm["accuracy"],
+                "roc_auc": fm["roc_auc"],
+                "brier_score": fm["brier_score"],
+                "n_samples": f.test_rows,
+            }
+            for f, fm in zip(folds[:len(fold_metrics)], fold_metrics)
+        ]
+        repository.save_walk_forward_results(db_records)
+    except Exception as exc:
+        logger.warning("Failed to save walk-forward fold results to DB: %s", exc)
+
     return report
+
 
 
 def save_model(

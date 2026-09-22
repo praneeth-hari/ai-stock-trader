@@ -392,3 +392,47 @@ class TestEventLog:
         repo.log_event("INFO", "pipeline", "No details needed", None)
         events = repo.get_events()
         assert events[0]["details"] is None
+
+
+class TestWalkForwardResults:
+    def test_save_and_get_walk_forward_results(self):
+        """Verify saving fold metrics and reading back history."""
+        repo = _repo()
+        repo.create_all_tables()
+
+        records = [
+            {
+                "model_type": "primary",
+                "fold_number": 0,
+                "train_start": "2021-01-01",
+                "train_end": "2022-12-31",
+                "test_start": "2023-01-01",
+                "test_end": "2023-06-30",
+                "accuracy": 0.65,
+                "roc_auc": 0.72,
+                "brier_score": 0.20,
+                "n_samples": 126,
+            },
+            {
+                "model_type": "primary",
+                "fold_number": 1,
+                "train_start": "2021-07-01",
+                "train_end": "2023-06-30",
+                "test_start": "2023-07-01",
+                "test_end": "2023-12-31",
+                "accuracy": 0.68,
+                "roc_auc": 0.75,
+                "brier_score": 0.18,
+                "n_samples": 126,
+            },
+        ]
+
+        count = repo.save_walk_forward_results(records)
+        assert count == 2
+
+        history_df = repo.get_walk_forward_history("primary")
+        assert not history_df.empty
+        assert len(history_df) == 2
+        assert list(history_df["fold_number"]) == [0, 1]
+        assert float(history_df["roc_auc"].iloc[1]) == 0.75
+

@@ -56,6 +56,7 @@ from dashboard.data_loader import (
     get_market_regime_and_predictions,
     get_model_drift_summary,
     get_orders_df,
+    get_performance_metrics_data,
     get_portfolio_diversification_summary,
     get_portfolio_sectors_summary,
     get_portfolio_summary,
@@ -65,6 +66,7 @@ from dashboard.data_loader import (
     get_sector_allocation_donut_data,
     get_sector_rotation_summary,
     get_system_events_df,
+    get_walk_forward_history_data,
     get_win_loss_trades_chart_data,
     ask_chatbot_trigger,
     run_backtest_lab_trigger,
@@ -949,8 +951,53 @@ with tab3:
         except ImportError:
             st.warning("`shap` library is not installed. Run `pip install shap` to enable SHAP directional analysis.")
 
+    # ── Walk-Forward Validation History ─────────────────────────────────────────
+
+    st.markdown("---")
+    st.subheader("🔄 Walk-Forward Validation History")
+    st.caption("Historical out-of-sample fold performance across training runs (zero label leakage).")
+
+    wf_df = get_walk_forward_history_data()
+    if not wf_df.empty:
+        disp_wf = wf_df[[
+            "trained_at", "model_type", "fold_number",
+            "train_start", "train_end", "test_start", "test_end",
+            "accuracy", "roc_auc", "brier_score", "n_samples"
+        ]].rename(columns={
+            "trained_at": "Trained At",
+            "model_type": "Model Type",
+            "fold_number": "Fold #",
+            "train_start": "Train Start",
+            "train_end": "Train End",
+            "test_start": "Test Start",
+            "test_end": "Test End",
+            "accuracy": "Accuracy",
+            "roc_auc": "ROC-AUC",
+            "brier_score": "Brier Score",
+            "n_samples": "Test Samples",
+        })
+
+        st.dataframe(
+            disp_wf.style.format({
+                "Accuracy": "{:.4f}",
+                "ROC-AUC": "{:.4f}",
+                "Brier Score": "{:.4f}",
+            }),
+            use_container_width=True,
+            height=220,
+        )
+
+        st.markdown("#### 📈 ROC-AUC Across Folds")
+        if "fold_number" in wf_df.columns and "roc_auc" in wf_df.columns:
+            chart_wf = wf_df.copy()
+            chart_wf["Fold Label"] = chart_wf.apply(lambda r: f"Fold {r['fold_number']} ({r['model_type']})", axis=1)
+            st.line_chart(chart_wf.set_index("Fold Label")["roc_auc"])
+    else:
+        st.info("No walk-forward validation history recorded yet. Retrain model to record fold performance history.")
+
 
 # ── Tab 4: Backtest vs SPY Benchmark ──────────────────────────────────────────
+
 
 with tab4:
     st.subheader("Historical Backtest vs SPY Benchmark (2021–2024)")
@@ -1037,8 +1084,43 @@ with tab_perf:
     st.subheader("📊 Visual Performance Charts")
     st.caption("Institutional-grade visual tracking of portfolio returns, benchmark comparison, trade outcomes, and sector exposure.")
 
+    # ── Top Performance Metrics Banner ──────────────────────────────────────────
+    perf_metrics = get_performance_metrics_data()
+
+    sharpe = perf_metrics["sharpe_ratio"]
+    max_dd = perf_metrics["max_drawdown_pct"]
+    calmar = perf_metrics["calmar_ratio"]
+    sortino = perf_metrics["sortino_ratio"]
+    win_rate = perf_metrics["win_rate_pct"]
+    profit_factor = perf_metrics["profit_factor"]
+
+    # Color coding indicators per prompt specification
+    sharpe_badge = "Good ✅" if sharpe > 1.0 else ("Moderate ⚠️" if sharpe >= 0 else "Poor ❌")
+    dd_badge = "Healthy ✅" if max_dd < 10.0 else ("Moderate ⚠️" if max_dd <= 20.0 else "High Risk ❌")
+
+    # Row 1: [Sharpe Ratio] [Max Drawdown] [Calmar Ratio]
+    r1_col1, r1_col2, r1_col3 = st.columns(3)
+    with r1_col1:
+        st.metric("Sharpe Ratio", f"{sharpe:.2f}", delta=sharpe_badge, help="Annualized risk-adjusted return (mean daily return / std dev * sqrt(252)). >1.0 Good ✅, 0-1.0 Moderate ⚠️, <0 Poor ❌")
+    with r1_col2:
+        st.metric("Max Drawdown", f"{max_dd:.2f}%", delta=dd_badge, delta_color="inverse", help="Biggest portfolio loss from peak. <10% Healthy ✅, 10-20% Moderate ⚠️, >20% High Risk ❌")
+    with r1_col3:
+        st.metric("Calmar Ratio", f"{calmar:.2f}", help="Annualized return divided by maximum drawdown.")
+
+    # Row 2: [Sortino Ratio] [Win Rate] [Profit Factor]
+    r2_col1, r2_col2, r2_col3 = st.columns(3)
+    with r2_col1:
+        st.metric("Sortino Ratio", f"{sortino:.2f}", help="Risk-adjusted return penalizing downside volatility only.")
+    with r2_col2:
+        st.metric("Win Rate", f"{win_rate:.1f}%", help="Percentage of closed trades that resulted in a net profit.")
+    with r2_col3:
+        st.metric("Profit Factor", f"{profit_factor:.2f}", help="Ratio of total gross profit to total gross loss.")
+
+    st.markdown("---")
+
     # 1. Portfolio vs SPY Line Chart
     st.markdown("### 1. Portfolio vs SPY Benchmark")
+
     st.caption("Historical equity trajectory compared to SPY buy-and-hold benchmark. Periods of underperformance highlighted in red.")
     spy_comp_df = get_portfolio_vs_spy_chart_data()
     spy_chart = build_portfolio_vs_spy_chart(spy_comp_df)

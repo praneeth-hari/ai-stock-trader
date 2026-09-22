@@ -1299,6 +1299,119 @@ def ask_chatbot_trigger(user_message: str, chat_history: Optional[List[Dict[str,
     return ask_gemini_chatbot(user_message=user_message, chat_history=chat_history)
 
 
+# ── Performance Metrics & Walk Forward History Data Loaders ───────────────────
+
+def get_performance_metrics_data() -> Dict[str, Any]:
+    """
+    Computes performance metrics: Sharpe Ratio, Max Drawdown, Calmar Ratio,
+    Sortino Ratio, Win Rate %, Profit Factor from snapshots and trades tables.
+    """
+    metrics = {
+        "sharpe_ratio": 0.0,
+        "max_drawdown_pct": 0.0,
+        "calmar_ratio": 0.0,
+        "sortino_ratio": 0.0,
+        "win_rate_pct": 0.0,
+        "profit_factor": 0.0,
+    }
+
+    import numpy as np
+
+    try:
+        equity_df = get_equity_history_df()
+        if not equity_df.empty and len(equity_df) >= 2:
+            equity_df = equity_df.sort_values("date").reset_index(drop=True)
+            values = equity_df["total_value"].astype(float)
+
+            # Daily returns
+            daily_returns = values.pct_change().dropna()
+
+            # 1. Sharpe Ratio
+            if len(daily_returns) > 1 and daily_returns.std() > 0:
+                metrics["sharpe_ratio"] = round(float((daily_returns.mean() / daily_returns.std()) * np.sqrt(252)), 2)
+
+            # 2. Max Drawdown
+            cummax = values.cummax()
+            drawdowns = (cummax - values) / cummax
+            max_dd = float(drawdowns.max()) if not drawdowns.empty else 0.0
+            metrics["max_drawdown_pct"] = round(max_dd * 100.0, 2)
+
+            # Annualized Return for Calmar
+            start_val = values.iloc[0]
+            end_val = values.iloc[-1]
+            try:
+                d0 = pd.to_datetime(equity_df["date"].iloc[0])
+                d1 = pd.to_datetime(equity_df["date"].iloc[-1])
+                days = (d1 - d0).days
+            except Exception:
+                days = 0
+
+            if days > 0 and start_val > 0:
+                cagr = (end_val / start_val) ** (365.25 / max(days, 1)) - 1.0
+            elif start_val > 0:
+                cagr = (end_val - start_val) / start_val
+            else:
+                cagr = 0.0
+
+            # 3. Calmar Ratio
+            if max_dd > 0:
+                metrics["calmar_ratio"] = round(float(cagr / max_dd), 2)
+            else:
+                metrics["calmar_ratio"] = round(float(cagr * 100) if cagr > 0 else 0.0, 2)
+
+            # 4. Sortino Ratio
+            downside_returns = daily_returns[daily_returns < 0]
+            if len(downside_returns) > 1:
+                downside_std = downside_returns.std()
+                if downside_std > 0:
+                    metrics["sortino_ratio"] = round(float((daily_returns.mean() / downside_std) * np.sqrt(252)), 2)
+            elif len(downside_returns) == 1:
+                downside_std = abs(float(downside_returns.iloc[0]))
+                if downside_std > 0:
+                    metrics["sortino_ratio"] = round(float((daily_returns.mean() / downside_std) * np.sqrt(252)), 2)
+            elif len(daily_returns) > 0 and daily_returns.mean() > 0:
+                metrics["sortino_ratio"] = round(metrics["sharpe_ratio"], 2)
+
+    except Exception as exc:
+        logger.warning("Error calculating performance metrics: %s", exc)
+
+    # Trades metrics: Win Rate % and Profit Factor
+    try:
+        closed_df, summary_metrics, _ = get_closed_trade_history()
+        metrics["win_rate_pct"] = round(float(summary_metrics.get("win_rate", 0.0)), 1)
+
+        if not closed_df.empty and "Profit / Loss ($)" in closed_df.columns:
+            pnls = closed_df["Profit / Loss ($)"].astype(float)
+            gross_profit = float(pnls[pnls > 0].sum())
+            gross_loss = abs(float(pnls[pnls < 0].sum()))
+            if gross_loss > 0:
+                metrics["profit_factor"] = round(gross_profit / gross_loss, 2)
+            elif gross_profit > 0:
+                metrics["profit_factor"] = round(gross_profit, 2)
+            else:
+                metrics["profit_factor"] = 0.0
+    except Exception as exc:
+        logger.warning("Error calculating trade metrics: %s", exc)
+
+    return metrics
+
+
+def get_walk_forward_history_data(model_type: Optional[str] = None) -> pd.DataFrame:
+    """
+    Fetches walk-forward validation history from the database.
+    """
+    try:
+        return repository.get_walk_forward_history(model_type=model_type)
+    except Exception as exc:
+        logger.warning("Failed to load walk-forward history: %s", exc)
+        return pd.DataFrame(columns=[
+            "id", "trained_at", "model_type", "fold_number",
+            "train_start", "train_end", "test_start", "test_end",
+            "accuracy", "roc_auc", "brier_score", "n_samples",
+        ])
+
+
+
 
 
 

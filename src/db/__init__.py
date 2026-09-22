@@ -12,6 +12,7 @@ from src.db.repository import (
     get_portfolio_snapshot,
     get_predictions,
     get_trades,
+    get_walk_forward_history,
     log_event,
     save_features,
     save_market_data,
@@ -19,6 +20,7 @@ from src.db.repository import (
     save_portfolio_snapshot,
     save_predictions,
     save_trade,
+    save_walk_forward_results,
 )
 
 __all__ = [
@@ -32,6 +34,7 @@ __all__ = [
     "get_portfolio_snapshot",
     "get_predictions",
     "get_trades",
+    "get_walk_forward_history",
     "log_event",
     "save_features",
     "save_market_data",
@@ -39,4 +42,6 @@ __all__ = [
     "save_portfolio_snapshot",
     "save_predictions",
     "save_trade",
+    "save_walk_forward_results",
 ]
+

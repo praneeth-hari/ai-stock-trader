@@ -78,6 +78,7 @@ from src.db.models import (
     StrategyTradeRow,
     StrategyVariantRow,
     TradeRow,
+    WalkForwardResultRow,
 )
 
 logger = logging.getLogger(__name__)
@@ -1274,3 +1275,79 @@ def get_strategy_trades(strategy_id: Optional[int] = None) -> List[Dict[str, Any
             }
             for r in rows
         ]
+
+
+# ── Walk-Forward Validation Results ───────────────────────────────────────────
+
+def save_walk_forward_results(results: List[Dict[str, Any]]) -> int:
+    """
+    Save walk-forward fold validation metrics to walk_forward_results table.
+    Silently no-ops in stateless mode (DB unavailable).
+    """
+    if not _db_available or not results:
+        return 0
+    _assert_safe_write_target()
+
+    saved = 0
+    now_dt = datetime.now(timezone.utc)
+    with Session(get_engine()) as session:
+        for r in results:
+            row = WalkForwardResultRow(
+                trained_at=now_dt,
+                model_type=str(r.get("model_type", "primary")),
+                fold_number=int(r.get("fold_number", r.get("fold", 0))),
+                train_start=str(r.get("train_start", "")),
+                train_end=str(r.get("train_end", "")),
+                test_start=str(r.get("test_start", "")),
+                test_end=str(r.get("test_end", "")),
+                accuracy=float(r.get("accuracy", 0.0)),
+                roc_auc=float(r.get("roc_auc", 0.0)),
+                brier_score=float(r.get("brier_score", 0.0)),
+                n_samples=int(r.get("n_samples", r.get("test_rows", 0))),
+            )
+            session.add(row)
+            saved += 1
+        session.commit()
+
+    logger.info("save_walk_forward_results: saved %d fold records.", saved)
+    return saved
+
+
+def get_walk_forward_history(model_type: Optional[str] = None) -> pd.DataFrame:
+    """
+    Return walk-forward validation history as a pandas DataFrame.
+    Returns empty DataFrame in stateless mode or when no records exist.
+    """
+    cols = [
+        "id", "trained_at", "model_type", "fold_number",
+        "train_start", "train_end", "test_start", "test_end",
+        "accuracy", "roc_auc", "brier_score", "n_samples",
+    ]
+    if not _db_available:
+        return pd.DataFrame(columns=cols)
+
+    with Session(get_engine()) as session:
+        stmt = select(WalkForwardResultRow)
+        if model_type:
+            stmt = stmt.where(WalkForwardResultRow.model_type == model_type)
+        stmt = stmt.order_by(WalkForwardResultRow.trained_at.desc(), WalkForwardResultRow.fold_number.asc())
+        rows = session.execute(stmt).scalars().all()
+
+    if not rows:
+        return pd.DataFrame(columns=cols)
+
+    return pd.DataFrame([{
+        "id": r.id,
+        "trained_at": r.trained_at.strftime("%Y-%m-%d %H:%M:%S") if r.trained_at else "",
+        "model_type": r.model_type,
+        "fold_number": r.fold_number,
+        "train_start": r.train_start,
+        "train_end": r.train_end,
+        "test_start": r.test_start,
+        "test_end": r.test_end,
+        "accuracy": r.accuracy,
+        "roc_auc": r.roc_auc,
+        "brier_score": r.brier_score,
+        "n_samples": r.n_samples,
+    } for r in rows])
+

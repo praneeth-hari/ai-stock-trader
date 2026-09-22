@@ -325,18 +325,19 @@ def notify_daily_summary(
         cash_p = cash_pct if cash_pct is not None else 0.0
         cash_str = f"🏦 Cash: ${cash_val:,.2f} ({cash_p:.1f}%)"
 
-        # Extract positions dictionary
+        # Extract positions dictionary (explicit argument takes precedence over snapshot)
         pos_dict = {}
-        if snapshot and isinstance(snapshot.get("positions"), dict) and snapshot["positions"]:
-            pos_dict = snapshot["positions"]
-        elif isinstance(positions, dict):
+        if isinstance(positions, dict) and positions:
             pos_dict = positions
-        elif isinstance(positions, list):
+        elif isinstance(positions, list) and positions:
             for item in positions:
                 if isinstance(item, dict) and "ticker" in item:
                     pos_dict[str(item["ticker"]).upper()] = item
                 elif isinstance(item, str):
                     pos_dict[item.upper()] = {"ticker": item.upper()}
+        elif snapshot and isinstance(snapshot.get("positions"), dict) and snapshot["positions"]:
+            pos_dict = snapshot["positions"]
+
 
         max_pos = max_positions if max_positions is not None else getattr(settings, "max_positions", 3)
         num_pos = len(pos_dict) if pos_dict else (len(positions) if isinstance(positions, list) else 0)
