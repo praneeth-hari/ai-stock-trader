@@ -1,10 +1,14 @@
 # Never upload these!
 .env
 *.db
+data/fundamentals/
 data/raw/
 data/processed/
 data/models/
 models/*.pkl
+reports/*.pdf
+reports/*.csv
+*.log
 logs/
 __pycache__/
 *.pyc
