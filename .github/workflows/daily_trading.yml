@@ -42,3 +42,24 @@ jobs:
         EMAIL_ALERTS_ENABLED: false
         DATABASE_URL: ${{ secrets.DATABASE_URL }}
       run: python -m src.pipeline.scheduler --force
+
+    - name: Notify success
+      if: success()
+      env:
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      run: |
+        curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+          -d chat_id="${TELEGRAM_CHAT_ID}" \
+          -d text="✅ GitHub Actions: Pipeline completed successfully!"
+
+    - name: Notify failure
+      if: failure()
+      env:
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      run: |
+        curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+          -d chat_id="${TELEGRAM_CHAT_ID}" \
+          -d text="❌ GitHub Actions: Pipeline FAILED! Check logs at github.com/praneeth-hari/ai-stock-trader/actions"
+
