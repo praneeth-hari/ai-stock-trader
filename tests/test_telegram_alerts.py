@@ -202,7 +202,9 @@ class TestTriggerBuilders:
         msg = mock_notify.call_args[0][0]
         assert "📊 DAILY SUMMARY" in msg
         assert "📅 Date: 2024-03-15" in msg
-        assert "📈 Today's Change: $+120.50 (+1.15%)" in msg
-        assert "🏦 Cash Reserve: $3,000.00 (28.5%)" in msg
-        assert "📌 Open Positions: AAPL, META (2/5)" in msg
-        assert "✅ System Status: SUCCESS" in msg
+        assert "💼 Portfolio: $10,543.21" in msg
+        assert "📈 Today: +$120.50 (+1.15%)" in msg
+        assert "🏦 Cash: $3,000.00 (28.5%)" in msg
+        assert "📌 POSITIONS (2/5):" in msg
+        assert "✅ Pipeline: SUCCESS" in msg
+

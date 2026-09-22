@@ -237,6 +237,47 @@ def notify_psi_drift(psi_value: float) -> bool:
     return notify("\n".join(lines), alert_key=alert_key)
 
 
+def _get_top_ai_pick(run_date: str) -> Optional[str]:
+    """Retrieve top AI pick formatted string for run_date from repository predictions."""
+    try:
+        from src.db import repository
+        best_ticker = None
+        best_prob = -1.0
+
+        tickers = getattr(settings, "ticker_list", [])
+        for t in tickers:
+            try:
+                df = repository.get_predictions(t, start_date=run_date, end_date=run_date)
+                if not df.empty and "probability" in df.columns:
+                    prob = float(df.iloc[-1]["probability"])
+                    if prob > best_prob:
+                        best_prob = prob
+                        best_ticker = str(df.iloc[-1]["ticker"]).upper()
+            except Exception:
+                continue
+
+        if best_ticker and best_prob >= 0:
+            return f"{best_ticker} ({round(best_prob * 100)}%)"
+
+        if getattr(repository, "_db_available", False):
+            from sqlalchemy import select
+            from sqlalchemy.orm import Session
+            from src.db.repository import get_engine
+            from src.db.models import PredictionRow
+            with Session(get_engine()) as session:
+                row = session.execute(
+                    select(PredictionRow)
+                    .where(PredictionRow.date == run_date)
+                    .order_by(PredictionRow.probability.desc())
+                    .limit(1)
+                ).scalar_one_or_none()
+                if row:
+                    return f"{row.ticker.upper()} ({round(row.probability * 100)}%)"
+    except Exception as exc:
+        logger.debug("Failed to fetch top AI pick: %s", exc)
+    return None
+
+
 def notify_daily_summary(
     run_date: str,
     portfolio_value: float,
@@ -244,30 +285,141 @@ def notify_daily_summary(
     daily_pnl_pct: Optional[float] = None,
     cash: Optional[float] = None,
     cash_pct: Optional[float] = None,
-    positions: Optional[list] = None,
+    positions: Optional[Any] = None,
     max_positions: Optional[int] = None,
     status: str = "SUCCESS",
+    top_pick: Optional[str] = None,
+    alerts: Optional[str] = None,
 ) -> bool:
-    """Trigger 7: Daily summary on every successful pipeline run."""
+    """Trigger 7: Daily summary on every successful pipeline run (Freqtrade style format)."""
     alert_key = f"DAILY_SUMMARY_{run_date}"
-    lines = [
-        "📊 DAILY SUMMARY",
-        f"📅 Date: {run_date}",
-        f"💼 Total Portfolio Value: ${portfolio_value:,.2f}",
-    ]
-    if daily_pnl is not None:
-        pnl_pct_str = f" ({daily_pnl_pct:+.2f}%)" if daily_pnl_pct is not None else ""
-        lines.append(f"📈 Today's Change: ${daily_pnl:+,.2f}{pnl_pct_str}")
-    if cash is not None:
-        cash_pct_str = f" ({cash_pct:.1f}%)" if cash_pct is not None else ""
-        lines.append(f"🏦 Cash Reserve: ${cash:,.2f}{cash_pct_str}")
-    if positions is not None:
-        pos_str = ", ".join(str(p).upper() for p in positions) if positions else "None"
-        max_str = f"/{max_positions}" if max_positions is not None else ""
-        lines.append(f"📌 Open Positions: {pos_str} ({len(positions)}{max_str})")
-    status_icon = "✅" if status.upper() == "SUCCESS" else "⚠️"
-    lines.append(f"{status_icon} System Status: {status.upper()}")
-    return notify("\n".join(lines), alert_key=alert_key)
+    try:
+        snapshot = None
+        try:
+            from src.db import repository
+            snapshot = repository.get_latest_portfolio_snapshot()
+        except Exception as exc:
+            logger.debug("Failed to fetch latest portfolio snapshot for daily summary: %s", exc)
+
+        if snapshot:
+            if not portfolio_value:
+                portfolio_value = float(snapshot.get("total_value", 0.0) or 0.0)
+            if cash is None:
+                cash = float(snapshot.get("cash", 0.0) or 0.0)
+
+        if cash is not None and portfolio_value and portfolio_value > 0 and cash_pct is None:
+            cash_pct = (cash / portfolio_value) * 100.0
+
+        # Portfolio Today line
+        if daily_pnl is not None:
+            pnl_sign = "+" if daily_pnl >= 0 else "-"
+            pct_val = daily_pnl_pct if daily_pnl_pct is not None else 0.0
+            pct_sign = "+" if pct_val >= 0 else "-"
+            icon = "📈" if daily_pnl >= 0 else "📉"
+            today_str = f"{icon} Today: {pnl_sign}${abs(daily_pnl):,.2f} ({pct_sign}{abs(pct_val):.2f}%)"
+        else:
+            today_str = "📈 Today: +$0.00 (+0.00%)"
+
+        # Cash line
+        cash_val = cash if cash is not None else 0.0
+        cash_p = cash_pct if cash_pct is not None else 0.0
+        cash_str = f"🏦 Cash: ${cash_val:,.2f} ({cash_p:.1f}%)"
+
+        # Extract positions dictionary
+        pos_dict = {}
+        if snapshot and isinstance(snapshot.get("positions"), dict) and snapshot["positions"]:
+            pos_dict = snapshot["positions"]
+        elif isinstance(positions, dict):
+            pos_dict = positions
+        elif isinstance(positions, list):
+            for item in positions:
+                if isinstance(item, dict) and "ticker" in item:
+                    pos_dict[str(item["ticker"]).upper()] = item
+                elif isinstance(item, str):
+                    pos_dict[item.upper()] = {"ticker": item.upper()}
+
+        max_pos = max_positions if max_positions is not None else getattr(settings, "max_positions", 3)
+        num_pos = len(pos_dict) if pos_dict else (len(positions) if isinstance(positions, list) else 0)
+
+        pos_lines = []
+        if pos_dict:
+            for ticker, info in pos_dict.items():
+                t_upper = str(ticker).upper()
+                if isinstance(info, dict):
+                    qty = float(info.get("quantity") or info.get("shares") or 0.0)
+                    entry_p = float(info.get("entry_price") or 0.0)
+                    curr_p = float(info.get("current_price") or entry_p)
+                    pnl_val = info.get("unrealized_pnl")
+                    if pnl_val is None:
+                        pnl_val = (curr_p - entry_p) * qty if qty > 0 and entry_p > 0 else 0.0
+                    else:
+                        pnl_val = float(pnl_val)
+
+                    pnl_p = info.get("unrealized_pnl_pct")
+                    if pnl_p is None:
+                        pnl_p = ((curr_p - entry_p) / entry_p * 100.0) if entry_p > 0 else 0.0
+                    else:
+                        pnl_p = float(pnl_p)
+
+                    pnl_s = "+" if pnl_val >= 0 else "-"
+                    pct_s = "+" if pnl_p >= 0 else "-"
+                    pos_icon = "📈" if pnl_val >= 0 else "📉"
+
+                    pos_lines.append(
+                        f"- {t_upper}: {qty:.2f} shares\n"
+                        f"  Entry: ${entry_p:,.2f} → Now: ${curr_p:,.2f}\n"
+                        f"  P&L: {pnl_s}${abs(pnl_val):,.2f} ({pct_s}{abs(pnl_p):.2f}%) {pos_icon}"
+                    )
+                else:
+                    pos_lines.append(f"- {t_upper}: No data available")
+        elif isinstance(positions, list) and positions:
+            for t in positions:
+                t_upper = str(t).upper()
+                pos_lines.append(f"- {t_upper}: No data available")
+        else:
+            pos_lines.append("No open positions held")
+
+        positions_block = "\n\n".join(pos_lines)
+
+        # AI Top Pick
+        ai_pick_str = top_pick
+        if not ai_pick_str:
+            ai_pick_str = _get_top_ai_pick(run_date)
+        if not ai_pick_str:
+            ai_pick_str = "No data available"
+
+        alerts_str = alerts or "None"
+        status_icon = "✅" if status.upper() == "SUCCESS" else "⚠️"
+
+        lines = [
+            "📊 DAILY SUMMARY",
+            f"📅 Date: {run_date}",
+            "━━━━━━━━━━━━━━━━━━━━",
+            f"💼 Portfolio: ${portfolio_value:,.2f}",
+            today_str,
+            cash_str,
+            "━━━━━━━━━━━━━━━━━━━━",
+            f"📌 POSITIONS ({num_pos}/{max_pos}):",
+            positions_block,
+            "━━━━━━━━━━━━━━━━━━━━",
+            f"🤖 AI Top Pick Today: {ai_pick_str}",
+            f"⚠️ Alerts: {alerts_str}",
+            f"{status_icon} Pipeline: {status.upper()}",
+            "🎓 Paper trading only!",
+        ]
+
+        msg_text = "\n".join(lines)
+        return notify(msg_text, alert_key=alert_key)
+    except Exception as exc:
+        logger.warning("Failed to build daily summary notification: %s", exc)
+        fallback_msg = (
+            f"📊 DAILY SUMMARY\n"
+            f"📅 Date: {run_date}\n"
+            f"💼 Portfolio: ${portfolio_value:,.2f}\n"
+            f"✅ Pipeline: {status.upper()}"
+        )
+        return notify(fallback_msg, alert_key=alert_key)
+
 
 
 def notify_failover(
