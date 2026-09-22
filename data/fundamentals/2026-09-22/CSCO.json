@@ -1,0 +1,22 @@
+{
+  "ticker": "CSCO",
+  "fetch_date": "2026-09-22",
+  "trailing_pe": 33.135136,
+  "forward_pe": 19.695621,
+  "peg_ratio": 1.01,
+  "price_to_book": 8.658872,
+  "enterprise_to_ebitda": 23.979,
+  "profit_margins": 0.20951,
+  "operating_margins": 0.27719,
+  "return_on_equity": 0.27319,
+  "return_on_assets": 0.079780005,
+  "revenue_growth": 0.176,
+  "earnings_growth": 0.521,
+  "debt_to_equity": 62.017,
+  "current_ratio": 0.931,
+  "free_cash_flow": 11182624768.0,
+  "operating_cash_flow": 14177000448.0,
+  "dividend_yield": 1.53,
+  "payout_ratio": 0.4985,
+  "market_cap": 435025018880.0
+}

@@ -268,13 +268,6 @@ def notify_daily_summary(
     status_icon = "✅" if status.upper() == "SUCCESS" else "⚠️"
     lines.append(f"{status_icon} System Status: {status.upper()}")
     return notify("\n".join(lines), alert_key=alert_key)
-    if positions is not None:
-        pos_str = ", ".join(str(p).upper() for p in positions) if positions else "None"
-        max_str = f"/{max_positions}" if max_positions is not None else ""
-        lines.append(f"📌 Positions: {pos_str} ({len(positions)}{max_str})")
-    status_icon = "✅" if status.upper() == "SUCCESS" else "⚠️"
-    lines.append(f"{status_icon} Pipeline: {status.upper()}")
-    return notify("\n".join(lines), alert_key=alert_key)
 
 
 def notify_failover(

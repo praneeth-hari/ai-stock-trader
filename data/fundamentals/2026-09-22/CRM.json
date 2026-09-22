@@ -1,0 +1,22 @@
+{
+  "ticker": "CRM",
+  "fetch_date": "2026-09-22",
+  "trailing_pe": 21.701923,
+  "forward_pe": -124.72895,
+  "peg_ratio": 0.79,
+  "price_to_book": 5.082025,
+  "enterprise_to_ebitda": 17.581,
+  "profit_margins": 0.2199,
+  "operating_margins": 0.21375,
+  "return_on_equity": 0.19381,
+  "return_on_assets": 0.05704,
+  "revenue_growth": 0.108,
+  "earnings_growth": 1.189,
+  "debt_to_equity": 110.417,
+  "current_ratio": 0.839,
+  "free_cash_flow": 17731874816.0,
+  "operating_cash_flow": 15749999616.0,
+  "dividend_yield": 0.74,
+  "payout_ratio": 0.1568,
+  "market_cap": 195038658560.0
+}

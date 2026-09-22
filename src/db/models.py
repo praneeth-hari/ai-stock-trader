@@ -453,6 +453,3 @@ class StrategyTradeRow(Base):
 
     def __repr__(self) -> str:
         return f"<StrategyTradeRow strat={self.strategy_id} {self.date} {self.action} {self.ticker}>"
-
-    def __repr__(self) -> str:
-        return f"<FeatureImportanceRow {self.date} {self.model_type} {self.feature_name}={self.importance_score:.4f}>"

@@ -14,6 +14,7 @@ Run locally:
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -273,7 +274,13 @@ with st.sidebar:
                 st.error(f"Backtest error: {exc}")
 
     st.markdown("---")
-    st.caption("Active Model: `logistic_regression_baseline_v1`")
+    _meta_path = ROOT / "data" / "models" / "active_model_metadata.json"
+    try:
+        with open(_meta_path, "r", encoding="utf-8") as _f:
+            _active_model_name = json.load(_f).get("model_name", "Unknown")
+    except (FileNotFoundError, Exception):
+        _active_model_name = "Unknown"
+    st.caption(f"Active Model: `{_active_model_name}`")
     st.caption(f"Database: `{settings.db_url}`")
 
 
