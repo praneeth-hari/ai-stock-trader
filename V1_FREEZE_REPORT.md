@@ -21,7 +21,7 @@ Final benchmark for the configured strategy (2-year walk-forward, net of 0.2% pe
 
 ### Code
 
-- V1 commit: `________` (recorded after committing; see section 6 for what it contains).
+- V1 commit: `ed810d8adbbca13e6b2484c4184064ac7a49c838` (648 tests passed; see section 6 for what it contains). The hash is recorded in a follow-up commit that changes only this report.
 - Every effective setting equals its code default (checked 2026-09-26), so `.env` only repeats `config/settings.py` and a clean checkout runs the same configuration. `.env` stays uncommitted because it holds secrets.
 
 ### Model
