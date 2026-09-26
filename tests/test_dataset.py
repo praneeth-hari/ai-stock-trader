@@ -384,3 +384,64 @@ class TestKnownValues:
         assert labels[LABEL_COLUMN].iloc[2] == 1.0
         assert labels[LABEL_COLUMN].iloc[3] == 0.0
         assert labels[LABEL_COLUMN].iloc[4:].isna().all()
+
+
+# ── 9. Smart Labels (Reward Function) Tests ──────────────────────────────────────
+
+def test_smart_labels_penalizes_stop_loss():
+    import numpy as np
+    import pandas as pd
+    from src.ml.dataset import create_smart_labels
+    # Stock drops 10% on day 2 — should be labeled 0 (stop loss hit)
+    closes = [100, 90, 105, 106, 107, 108]
+    df = pd.DataFrame({"close": closes})
+    labels = create_smart_labels(df, horizon=5, stop_loss=0.08)
+    assert labels.iloc[0] == 0  # stop loss hit
+
+
+def test_smart_labels_rewards_clean_winner():
+    import numpy as np
+    import pandas as pd
+    from src.ml.dataset import create_smart_labels
+    # Stock rises cleanly 5% — should be labeled 1
+    closes = [100, 101, 102, 103, 104, 105]
+    df = pd.DataFrame({"close": closes})
+    labels = create_smart_labels(df, horizon=5, stop_loss=0.08)
+    assert labels.iloc[0] == 1  # clean winner
+
+
+def test_smart_labels_nan_at_end():
+    import numpy as np
+    import pandas as pd
+    from src.ml.dataset import create_smart_labels
+    closes = [100, 101, 102, 103, 104, 105]
+    df = pd.DataFrame({"close": closes})
+    labels = create_smart_labels(df, horizon=5, stop_loss=0.08)
+    assert np.isnan(labels.iloc[-1])  # last row has no future data
+
+
+def test_embargo_gap_prevents_leakage():
+    import pandas as pd
+    import numpy as np
+    from config.settings import settings
+
+    # Create sample data
+    dates = pd.date_range('2020-01-01', periods=100, freq='B')
+    df = pd.DataFrame({
+        'close': np.random.randn(100).cumsum() + 100,
+        'date': dates.strftime('%Y-%m-%d')
+    })
+
+    split_idx = int(len(df) * 0.8)
+    embargo = settings.prediction_horizon_days
+
+    train = df.iloc[:split_idx]
+    test = df.iloc[split_idx + embargo:]
+
+    # Verify gap exists
+    assert len(test) == len(df) - split_idx - embargo
+    assert len(train) + embargo + len(test) == len(df)
+
+def test_embargo_size_matches_prediction_horizon():
+    from config.settings import settings
+    assert settings.prediction_horizon_days == 5

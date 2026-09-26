@@ -6,6 +6,7 @@ Renders four core institutional-grade visual performance charts:
 2. Daily Returns Frequency Histogram (green positive, red negative, vertical zero line)
 3. Win/Loss Closed Trades Bar Chart (green profit, red loss, dollar height)
 4. Sector Allocation Donut Chart (color-coded sector slices + cash reserve)
+5. Candlestick Chart with Trade Markers (Plotly)
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from __future__ import annotations
 from typing import Optional
 import altair as alt
 import pandas as pd
+import plotly.graph_objects as go
 
 
 def build_portfolio_vs_spy_chart(df: pd.DataFrame) -> Optional[alt.LayerChart]:
@@ -516,3 +518,129 @@ def build_leaderboard_equity_chart(df: pd.DataFrame) -> Optional[alt.Chart]:
         )
     )
     return chart
+
+
+# ── Candlestick Chart with Trade Markers (Plotly) ─────────────────────────────────
+
+def build_candlestick_chart(
+    ohlcv_df: pd.DataFrame,
+    ticker: str,
+    trades_df: Optional[pd.DataFrame] = None,
+) -> Optional[go.Figure]:
+    """
+    Build an interactive Plotly candlestick chart with buy/sell markers.
+
+    Parameters
+    ----------
+    ohlcv_df : pd.DataFrame
+        DataFrame with columns: date, open, high, low, close, volume.
+        Should contain the last 30 trading days of data.
+    ticker : str
+        Ticker symbol for the chart title.
+    trades_df : pd.DataFrame, optional
+        DataFrame with columns: date, ticker, action (BUY/SELL), price.
+        Used to mark entry/exit points on the chart.
+
+    Returns
+    -------
+    plotly.graph_objects.Figure or None if ohlcv_df is empty.
+    """
+    if ohlcv_df.empty:
+        return None
+
+    df = ohlcv_df.copy()
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"])
+    df = df.sort_values("date").tail(30).reset_index(drop=True)
+
+    fig = go.Figure()
+
+    # Candlestick trace
+    fig.add_trace(go.Candlestick(
+        x=df["date"],
+        open=df["open"],
+        high=df["high"],
+        low=df["low"],
+        close=df["close"],
+        name="OHLC",
+        increasing_line_color="#26a69a",
+        decreasing_line_color="#ef5350",
+        increasing_fillcolor="#26a69a",
+        decreasing_fillcolor="#ef5350",
+    ))
+
+    # Volume bars as secondary y-axis
+    fig.add_trace(go.Bar(
+        x=df["date"],
+        y=df["volume"],
+        name="Volume",
+        marker_color="rgba(100, 100, 255, 0.3)",
+        yaxis="y2",
+        opacity=0.4,
+    ))
+
+    # Buy/Sell markers from trades
+    if trades_df is not None and not trades_df.empty:
+        ticker_trades = trades_df[trades_df["ticker"].str.upper() == ticker.upper()].copy()
+        if not ticker_trades.empty:
+            ticker_trades["date"] = pd.to_datetime(ticker_trades["date"])
+
+            buys = ticker_trades[ticker_trades["action"].str.upper() == "BUY"]
+            sells = ticker_trades[ticker_trades["action"].str.upper() == "SELL"]
+
+            if not buys.empty:
+                fig.add_trace(go.Scatter(
+                    x=buys["date"],
+                    y=buys["price"],
+                    mode="markers",
+                    name="Buy",
+                    marker=dict(
+                        symbol="triangle-up",
+                        size=12,
+                        color="#26a69a",
+                        line=dict(width=1, color="white"),
+                    ),
+                    hovertemplate="<b>BUY</b><br>Date: %{x}<br>Price: $%{y:.2f}<extra></extra>",
+                ))
+
+            if not sells.empty:
+                fig.add_trace(go.Scatter(
+                    x=sells["date"],
+                    y=sells["price"],
+                    mode="markers",
+                    name="Sell",
+                    marker=dict(
+                        symbol="triangle-down",
+                        size=12,
+                        color="#ef5350",
+                        line=dict(width=1, color="white"),
+                    ),
+                    hovertemplate="<b>SELL</b><br>Date: %{x}<br>Price: $%{y:.2f}<extra></extra>",
+                ))
+
+    # Layout
+    fig.update_layout(
+        title=f"{ticker} — Last 30 Trading Days (Candlestick + Volume)",
+        xaxis_title="Date",
+        yaxis_title="Price ($)",
+        yaxis2=dict(
+            title="Volume",
+            overlaying="y",
+            side="right",
+            showgrid=False,
+            showticklabels=True,
+        ),
+        xaxis_rangeslider_visible=False,
+        height=500,
+        template="plotly_dark",
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1,
+        ),
+        hovermode="x unified",
+    )
+
+    return fig

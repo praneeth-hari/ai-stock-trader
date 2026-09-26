@@ -242,6 +242,17 @@ def allocate_portfolio(
                 logger.warning(f"Skipping buy order for {ticker}: invalid price (${price:.2f}) or alloc (${alloc:.2f})")
                 continue
 
+            # Enforce 15% cash reserve
+            investable_cash = cash * (1 - settings.cash_reserve)
+            cost = alloc
+            if cost > investable_cash:
+                logger.warning(
+                    "Cash reserve breach prevented — cost=%.2f "
+                    "exceeds investable cash=%.2f (15%% reserve enforced)",
+                    cost, investable_cash,
+                )
+                continue
+
             shares, gross_value, fee = calculate_fractional_shares(alloc, price, fee_rate)
             total_outflow = round(gross_value + fee, 4)
 
@@ -294,4 +305,29 @@ def allocate_portfolio(
         projected_positions=projected_positions,
         cash_reserve_floor=cash_reserve_floor,
         cash_reserve_maintained=cash_reserve_maintained,
+    )
+
+
+def get_strategy_dna() -> str:
+    from config.settings import settings
+    import json
+    from pathlib import Path
+    meta_path = settings.data_models_dir / "active_model_metadata.json"
+    model_type = "LR"
+    if meta_path.exists():
+        try:
+            with open(meta_path) as f:
+                meta = json.load(f)
+            model_type = "LR" if "logistic" in meta.get("model_type", "").lower() else "HGB"
+        except Exception:
+            pass
+    return (
+        f"DNA:{model_type}"
+        f"|BUY@{settings.buy_bar}"
+        f"|EXIT@{settings.signal_exit}"
+        f"|SL{int(settings.stop_loss*100)}%"
+        f"|TP{int(settings.take_profit*100)}%"
+        f"|MAX{settings.max_positions}"
+        f"|COST{settings.simulated_cost_per_trade*100}%"
+        f"|TRAIL{int(settings.trailing_stop_pct*100)}%"
     )

@@ -278,3 +278,21 @@ def test_6_integration_risk_engine_to_portfolio_allocation():
     assert "Portfolio Allocation Summary" in markdown
     assert "MSFT" in markdown
     assert "JPM" in markdown
+
+
+def test_strategy_dna_returns_string():
+    from src.portfolio.portfolio import get_strategy_dna
+    dna = get_strategy_dna()
+    assert isinstance(dna, str)
+    assert "DNA:" in dna
+    assert "BUY@" in dna
+    assert "SL" in dna
+
+
+def test_cash_reserve_enforced():
+    from config.settings import settings
+    assert settings.cash_reserve >= 0.15
+
+def test_india_pipeline_hour_ist():
+    from config.settings import settings
+    assert settings.india_pipeline_hour_ist == 16

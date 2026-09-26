@@ -551,3 +551,318 @@ def test_pipeline_idempotency_guard_prevents_duplicate_runs(tmp_path):
         repository._engine = None
         repository.settings.__dict__["db_url"] = original_url
 
+
+# ── IndiaPaperBroker Tests ───────────────────────────────────────────────────────
+
+def test_india_paper_broker_initial_state():
+    from src.trading.paper_broker import IndiaPaperBroker
+    from src.db import repository
+    # Clean up any existing India portfolio data
+    repository.save_india_portfolio(10000.0, {})
+    broker = IndiaPaperBroker()
+    summary = broker.get_portfolio_summary()
+    assert summary["cash"] == 10000.0
+    assert summary["currency"] == "INR"
+    assert summary["num_positions"] == 0
+
+
+def test_india_paper_broker_buy_and_sell():
+    from src.trading.paper_broker import IndiaPaperBroker
+    from src.db import repository
+    # Clean up any existing India portfolio data
+    repository.save_india_portfolio(10000.0, {})
+    broker = IndiaPaperBroker()
+    bought = broker.buy("RELIANCE.NS", price=2800.0, quantity=1.0)
+    assert bought is True
+    assert "RELIANCE.NS" in broker.positions
+    sold = broker.sell("RELIANCE.NS", price=2900.0)
+    assert sold is True
+    assert "RELIANCE.NS" not in broker.positions
+    assert broker.cash > 10000.0
+
+
+def test_india_paper_broker_max_positions():
+    from src.trading.paper_broker import IndiaPaperBroker
+    broker = IndiaPaperBroker()
+    broker.buy("RELIANCE.NS", price=100.0, quantity=1.0)
+    broker.buy("TCS.NS", price=100.0, quantity=1.0)
+    broker.buy("INFY.NS", price=100.0, quantity=1.0)
+    result = broker.buy("HDFCBANK.NS", price=100.0, quantity=1.0)
+    assert result is False
+
+
+def test_india_broker_persists_to_db():
+    from src.trading.paper_broker import IndiaPaperBroker
+    from src.db import repository
+    repository.create_all_tables()
+    broker1 = IndiaPaperBroker()
+    broker1.buy("TCS.NS", price=3500.0, quantity=1.0)
+    # Create new broker instance — should load from DB
+    broker2 = IndiaPaperBroker()
+    assert "TCS.NS" in broker2.positions
+    # cleanup
+    repository.save_india_portfolio(10000.0, {})
+
+
+# ── IndiaPaperBroker Input Validation Tests ──────────────────────────────────────
+
+def test_india_paper_broker_buy_rejects_zero_price():
+    from src.trading.paper_broker import IndiaPaperBroker
+    broker = IndiaPaperBroker()
+    result = broker.buy("TCS.NS", price=0.0, quantity=1.0)
+    assert result is False
+
+
+def test_india_paper_broker_buy_rejects_negative_price():
+    from src.trading.paper_broker import IndiaPaperBroker
+    broker = IndiaPaperBroker()
+    result = broker.buy("TCS.NS", price=-100.0, quantity=1.0)
+    assert result is False
+
+
+def test_india_paper_broker_buy_rejects_nan_price():
+    from src.trading.paper_broker import IndiaPaperBroker
+    import math
+    broker = IndiaPaperBroker()
+    result = broker.buy("TCS.NS", price=float("nan"), quantity=1.0)
+    assert result is False
+
+
+def test_india_paper_broker_buy_rejects_negative_quantity():
+    from src.trading.paper_broker import IndiaPaperBroker
+    broker = IndiaPaperBroker()
+    result = broker.buy("TCS.NS", price=100.0, quantity=-1.0)
+    assert result is False
+
+
+def test_india_paper_broker_buy_rejects_nan_quantity():
+    from src.trading.paper_broker import IndiaPaperBroker
+    import math
+    broker = IndiaPaperBroker()
+    result = broker.buy("TCS.NS", price=100.0, quantity=float("nan"))
+    assert result is False
+
+
+def test_india_paper_broker_sell_rejects_zero_price():
+    from src.trading.paper_broker import IndiaPaperBroker
+    broker = IndiaPaperBroker()
+    # First buy a position
+    broker.buy("TCS.NS", price=3500.0, quantity=1.0)
+    result = broker.sell("TCS.NS", price=0.0)
+    assert result is False
+
+
+def test_india_paper_broker_sell_rejects_negative_price():
+    from src.trading.paper_broker import IndiaPaperBroker
+    broker = IndiaPaperBroker()
+    broker.buy("TCS.NS", price=3500.0, quantity=1.0)
+    result = broker.sell("TCS.NS", price=-100.0)
+    assert result is False
+
+
+def test_india_paper_broker_sell_rejects_nan_price():
+    from src.trading.paper_broker import IndiaPaperBroker
+    import math
+    broker = IndiaPaperBroker()
+    broker.buy("TCS.NS", price=3500.0, quantity=1.0)
+    result = broker.sell("TCS.NS", price=float("nan"))
+    assert result is False
+
+
+# ── Regression Test: Same-Bar Execution Timing Prevention ────────────────────
+
+def test_signal_generated_at_t_cannot_execute_at_t_close(tmp_db):
+    """
+    REGRESSION TEST:
+    Verifies that a trade signal generated on Day T cannot execute at Day T close.
+    - Signal/order generated on Day T must remain pending at Day T close (fills = []).
+    - The pending order executes at Day T+1 market open at Day T+1's open price.
+    """
+    from unittest.mock import MagicMock, patch
+    from datetime import date, datetime as dt, timedelta
+    import numpy as np
+    from src.pipeline.daily_pipeline import run_daily_pipeline
+    from src.trading.paper_broker import PaperBroker
+    from src.features.engineer import FEATURE_COLUMNS
+    from src.db import repository
+
+    db_url, _ = tmp_db
+    repository._engine = None
+    original_url = repository.settings.db_url
+
+    try:
+        repository.settings.__dict__["db_url"] = db_url
+        repository.create_all_tables()
+
+        base_date = date(2023, 3, 1)
+        all_dates = [
+            (base_date + timedelta(days=i)).strftime("%Y-%m-%d")
+            for i in range(330)  # enough calendar days for 222 trading days (200-day features defined)
+        ]
+        all_dates = [d for d in all_dates if dt.strptime(d, "%Y-%m-%d").weekday() < 5][:222]
+
+        spy_df = _make_spy_df(all_dates, close=500.0)
+        # Small alternating wobble: a perfectly flat series leaves RSI etc. undefined (0/0), and
+        # tickers with incomplete features are skipped by the ranking.
+        aapl_closes = [100.0 * (1 + 0.003 * (-1) ** i) for i in range(220)] + [105.0, 110.0]
+        aapl_closes = aapl_closes[:len(all_dates)]
+        aapl_df = _make_ticker_df(all_dates, aapl_closes, ticker="AAPL")
+
+        day_t, day_t1 = all_dates[-2], all_dates[-1]
+
+        broker = PaperBroker()
+        broker.load_state()
+
+        mock_model = MagicMock()
+        mock_model.feature_columns = None
+        def fake_predict_proba(X):
+            n = len(X) if hasattr(X, '__len__') else 1
+            return np.array([[0.20, 0.80]] * n)
+
+        mock_model.predict_proba = MagicMock(side_effect=fake_predict_proba)
+        mock_model.model = MagicMock()
+        mock_model.model.predict_proba = MagicMock(side_effect=fake_predict_proba)
+        mock_model.model.feature_names_in_ = FEATURE_COLUMNS
+        mock_model.metadata = {"model_type": "baseline", "feature_columns": FEATURE_COLUMNS}
+
+        # ── Day T: Signal and order generated ──────────────────────────────────
+        spy_dt = spy_df[spy_df["date"] <= day_t].copy()
+        aapl_dt = aapl_df[aapl_df["date"] <= day_t].copy()
+
+        with patch("src.pipeline.daily_pipeline.load_active_model", return_value=mock_model):
+            result_t = run_daily_pipeline(
+                run_date=day_t,
+                tickers=["AAPL"],
+                broker=broker,
+                _spy_df=spy_dt,
+                _universe_dfs={"AAPL": aapl_dt},
+            )
+
+        # Assert order was generated as pending, but NOT executed at Day T close
+        assert result_t.orders_generated >= 1, "Order should be generated from Day T signal"
+        assert len(result_t.pending_orders) >= 1, "Order must be marked as pending"
+        assert len(result_t.fills) == 0, "Signal generated on Day T must NOT execute at Day T close"
+        assert "AAPL" not in broker.positions, "No position should be open at Day T close"
+        assert len(repository.get_trades(day_t)) == 0, "No trades should be recorded at Day T close"
+        assert len(broker.pending_orders) >= 1, "Broker must hold the pending order for next open"
+
+        # ── Day T+1: Pending order executes at next open ───────────────────────
+        spy_dt1 = spy_df[spy_df["date"] <= day_t1].copy()
+        aapl_dt1 = aapl_df[aapl_df["date"] <= day_t1].copy()
+        expected_open_price = float(aapl_dt1[aapl_dt1["date"] == day_t1].iloc[0]["open"])
+
+        with patch("src.pipeline.daily_pipeline.load_active_model", return_value=mock_model):
+            result_t1 = run_daily_pipeline(
+                run_date=day_t1,
+                tickers=["AAPL"],
+                broker=broker,
+                _spy_df=spy_dt1,
+                _universe_dfs={"AAPL": aapl_dt1},
+            )
+
+        # Assert pending order was executed at Day T+1 open
+        assert len(result_t1.fills) >= 1, "Pending order must execute at next market open (Day T+1)"
+        fill = result_t1.fills[0]
+        assert fill.action == "BUY"
+        assert fill.ticker == "AAPL"
+        assert fill.fill_price == pytest.approx(expected_open_price, rel=1e-3), \
+            f"Fill price {fill.fill_price} should match Day T+1 open price {expected_open_price}"
+        assert "AAPL" in broker.positions, "Position must be opened at Day T+1 open"
+        assert len(repository.get_trades(day_t1)) >= 1, "Trade must be recorded on Day T+1"
+    finally:
+        repository._engine = None
+        repository.settings.__dict__["db_url"] = original_url
+
+
+def test_newly_listed_ticker_does_not_block_live_trading_day(tmp_db):
+    """
+    REGRESSION: a ticker with insufficient history (NaN features) in the live universe must be
+    skipped for the day, not abort ranking — the valid ticker still gets its order.
+    """
+    from unittest.mock import MagicMock, patch
+    from datetime import date, datetime as dt, timedelta
+    import numpy as np
+    from src.pipeline.daily_pipeline import run_daily_pipeline
+    from src.trading.paper_broker import PaperBroker
+    from src.features.engineer import FEATURE_COLUMNS
+    from src.db import repository
+
+    db_url, _ = tmp_db
+    repository._engine = None
+    original_url = repository.settings.db_url
+    try:
+        repository.settings.__dict__["db_url"] = db_url
+        repository.create_all_tables()
+
+        base_date = date(2023, 3, 1)
+        all_dates = [(base_date + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(330)]
+        all_dates = [x for x in all_dates if dt.strptime(x, "%Y-%m-%d").weekday() < 5][:222]
+        day_t = all_dates[-2]
+
+        spy_df = _make_spy_df(all_dates, close=500.0)
+        aapl_df = _make_ticker_df(all_dates, [100.0 * (1 + 0.003 * (-1) ** i) for i in range(222)], ticker="AAPL")
+        newco_df = _make_ticker_df(all_dates[-30:], [20.0 * (1 + 0.003 * (-1) ** i) for i in range(30)], ticker="NEWCO")
+
+        def guarded_predict(X):
+            if X[FEATURE_COLUMNS].isna().any().any():
+                raise ValueError("Features contain NaN values. Inference cannot proceed.")
+            return np.array([[0.20, 0.80]] * len(X))
+
+        mock_model = MagicMock()
+        mock_model.predict_proba = MagicMock(side_effect=guarded_predict)
+        mock_model.metadata = {"model_type": "baseline", "feature_columns": FEATURE_COLUMNS}
+
+        broker = PaperBroker()
+        broker.load_state()
+        with patch("src.pipeline.daily_pipeline.load_active_model", return_value=mock_model):
+            result = run_daily_pipeline(
+                run_date=day_t,
+                tickers=["AAPL", "NEWCO"],
+                broker=broker,
+                _spy_df=spy_df[spy_df["date"] <= day_t].copy(),
+                _universe_dfs={
+                    "AAPL": aapl_df[aapl_df["date"] <= day_t].copy(),
+                    "NEWCO": newco_df[newco_df["date"] <= day_t].copy(),
+                },
+            )
+
+        assert not any("Ranking/model inference failed" in e for e in result.errors), result.errors
+        order_tickers = {o.ticker for o in result.pending_orders}
+        assert "AAPL" in order_tickers and "NEWCO" not in order_tickers
+    finally:
+        repository._engine = None
+        repository.settings.__dict__["db_url"] = original_url
+
+
+def test_pending_orders_never_written_to_production_data_dir():
+    """
+    REGRESSION: a test run must never leave PaperBroker pending orders in production data/,
+    where the next live paper-trading run would load and execute them as phantom orders.
+    """
+    import json
+    from pathlib import Path
+    import src.trading.paper_broker as pb
+    from src.portfolio.portfolio import OrderSpec
+
+    prod_dir = Path("data").resolve()
+    snapshot = lambda: {p.name: p.stat().st_mtime_ns for p in prod_dir.glob("pending_orders_*.json")}
+    before = snapshot()
+    assert Path(pb.PENDING_ORDERS_DIR).resolve() != prod_dir, "tests/conftest.py isolation fixture is not active"
+
+    saved_cache = dict(pb._pending_orders_cache)
+    try:
+        broker = pb.PaperBroker(market="US")
+        broker.sync_pending_orders([OrderSpec(
+            date="2026-09-14", ticker="AAPL", action="BUY", order_type="MARKET", shares=1.0,
+            reference_price=100.0, gross_value=100.0, estimated_fee=0.2, net_amount=100.2,
+            reason="QUALIFIED_CONVICTION_BUY", confidence_tier="FULL",
+        )])
+
+        written = pb._pending_orders_path("US")
+        assert written.exists() and json.loads(written.read_text())[0]["ticker"] == "AAPL"
+        assert prod_dir not in written.resolve().parents
+        assert snapshot() == before, "production data/pending_orders_*.json was created or modified by a test"
+    finally:
+        pb._pending_orders_cache.clear()
+        pb._pending_orders_cache.update(saved_cache)
+

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
 import yfinance as yf
 
@@ -134,13 +134,44 @@ def fetch_earnings_for_ticker(
     ticker_clean = ticker.upper().strip()
     fetched_str = as_of_date.strftime("%Y-%m-%d")
 
+    today_date = min(date.today(), datetime.now(timezone.utc).date())
+    is_historical = as_of_date < today_date
+
     earnings_dt: Optional[date] = None
-    try:
-        t = yf.Ticker(ticker_clean)
-        cal = getattr(t, "calendar", None)
-        earnings_dt = parse_earnings_date_from_calendar(cal)
-    except Exception as exc:
-        logger.warning("Could not fetch earnings calendar for %s: %s", ticker_clean, exc)
+
+    if is_historical:
+        # Historical replay: Do NOT call live Yahoo Finance API (returns today's future calendar).
+        # Check if point-in-time earnings calendar is in DB cache:
+        cached_cal = repository.get_latest_earnings_calendar(as_of_date=fetched_str)
+        if ticker_clean in cached_cal:
+            ed_str_val = cached_cal[ticker_clean].get("earnings_date")
+            if ed_str_val and ed_str_val != "N/A":
+                try:
+                    earnings_dt = datetime.strptime(ed_str_val[:10], "%Y-%m-%d").date()
+                except Exception:
+                    earnings_dt = None
+
+        if earnings_dt is None:
+            # Point-in-time earnings unavailable: use fail-safe neutral
+            logger.info("EARNINGS_HISTORICAL_UNAVAILABLE: No point-in-time earnings for %s on %s. Using neutral UNKNOWN.", ticker_clean, fetched_str)
+            return EarningsInfo(
+                ticker=ticker_clean,
+                earnings_date=None,
+                days_until_earnings=None,
+                status="UNKNOWN",
+                size_multiplier=1.0,
+                is_blocked=False,
+                hold_protection=False,
+                fetched_date=fetched_str,
+            )
+    else:
+        # Live trading mode: query live yfinance calendar
+        try:
+            t = yf.Ticker(ticker_clean)
+            cal = getattr(t, "calendar", None)
+            earnings_dt = parse_earnings_date_from_calendar(cal)
+        except Exception as exc:
+            logger.warning("Could not fetch earnings calendar for %s: %s", ticker_clean, exc)
 
     if earnings_dt is None:
         return EarningsInfo(
@@ -156,6 +187,18 @@ def fetch_earnings_for_ticker(
 
     days_until = (earnings_dt - as_of_date).days
     ed_str = earnings_dt.strftime("%Y-%m-%d")
+
+    if days_until < 0:
+        return EarningsInfo(
+            ticker=ticker_clean,
+            earnings_date=ed_str,
+            days_until_earnings=days_until,
+            status="OK",
+            size_multiplier=1.0,
+            is_blocked=False,
+            hold_protection=False,
+            fetched_date=fetched_str,
+        )
 
     # Evaluate rules
     if days_until == 0:
@@ -212,6 +255,9 @@ def get_universe_earnings_calendar(
     except Exception:
         as_of_dt = date.today()
 
+    today_date = min(date.today(), datetime.now(timezone.utc).date())
+    is_historical = as_of_dt < today_date
+
     calendar_map: Dict[str, EarningsInfo] = {}
     blocked: List[str] = []
     caution: List[str] = []
@@ -265,12 +311,13 @@ def get_universe_earnings_calendar(
         if info.status == "TODAY":
             today_list.append(t_clean)
 
-        db_records.append({
-            "ticker": info.ticker,
-            "earnings_date": info.earnings_date or "N/A",
-            "days_until_earnings": info.days_until_earnings,
-            "fetched_date": info.fetched_date,
-        })
+        if info.status != "UNKNOWN" or not is_historical:
+            db_records.append({
+                "ticker": info.ticker,
+                "earnings_date": info.earnings_date or "N/A",
+                "days_until_earnings": info.days_until_earnings,
+                "fetched_date": info.fetched_date,
+            })
 
     if persist and db_records:
         try:

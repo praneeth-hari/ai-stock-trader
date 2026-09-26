@@ -115,3 +115,47 @@ def test_fetch_ticker_data_live_spy(tmp_path: Path):
     snapshot_path = Path("data/raw") / pull_date / "SPY.csv"
     assert snapshot_path.exists()
     assert snapshot_path.stat().st_size > 0
+
+
+def test_is_muhurat_trading_day_known_date():
+    from src.data.market_data import is_muhurat_trading_day
+    assert is_muhurat_trading_day("2024-11-01") is True
+    assert is_muhurat_trading_day("2024-01-01") is False
+
+
+def test_get_t1_settlement_date():
+    from src.data.market_data import get_t1_settlement_date
+    # Friday trade -> Monday settlement
+    result = get_t1_settlement_date("2024-11-01")
+    assert result == "2024-11-04"
+
+
+def test_is_indian_market_open_weekend():
+    from src.data.market_data import is_indian_market_open
+    import pytz
+    from datetime import datetime
+    ist = pytz.timezone("Asia/Kolkata")
+    saturday = datetime(2024, 11, 2, 10, 0, tzinfo=ist)
+    assert is_indian_market_open(saturday) is False
+
+
+def test_fetch_india_market_data_returns_dict():
+    from src.data.market_data import fetch_india_market_data
+    result = fetch_india_market_data(tickers=["RELIANCE.NS"], days=7)
+    assert isinstance(result, dict)
+
+
+def test_fetch_india_market_data_empty_ticker():
+    from src.data.market_data import fetch_india_market_data
+    result = fetch_india_market_data(tickers=[], days=7)
+    assert result == {}
+
+
+def test_muhurat_blocks_trading():
+    from src.data.market_data import is_muhurat_trading_day
+    assert is_muhurat_trading_day('2024-11-01') is True
+    assert is_muhurat_trading_day('2024-11-02') is False
+
+def test_t1_settlement_friday_to_monday():
+    from src.data.market_data import get_t1_settlement_date
+    assert get_t1_settlement_date('2024-11-01') == '2024-11-04'

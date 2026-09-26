@@ -114,7 +114,7 @@ def test_define_standard_windows_includes_2008_and_2011_stress():
 
     # Check GFC window boundaries
     gfc = next(w for w in windows if "2008-2009 GFC" in w["name"])
-    assert gfc["test_start"] == "2008-09-08"
+    assert gfc["test_start"] == "2008-09-09"  # 5 trading-day embargo after 2008-08-29 (Labor Day 2008-09-01)
     assert gfc["test_end"] == "2009-06-30"
     assert "GFC Crisis" in gfc["regime_tag"]
 

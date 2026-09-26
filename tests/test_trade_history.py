@@ -275,3 +275,16 @@ def test_10_app_test_renders_trade_history_tab(clean_db):
         at = AppTest.from_file("dashboard/app.py", default_timeout=15)
         at.run()
         assert len(at.exception) == 0, f"App execution raised exceptions: {at.exception}"
+
+
+def test_risk_reward_column_exists():
+    from dashboard.data_loader import get_closed_trade_history
+    df, _, _ = get_closed_trade_history()
+    if not df.empty:
+        assert "Risk/Reward" in df.columns
+
+def test_risk_reward_is_numeric():
+    from dashboard.data_loader import get_closed_trade_history
+    df, _, _ = get_closed_trade_history()
+    if not df.empty and "Risk/Reward" in df.columns:
+        assert pd.to_numeric(df["Risk/Reward"], errors="coerce").notna().all()

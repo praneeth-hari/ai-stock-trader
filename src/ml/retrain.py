@@ -31,7 +31,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import numpy as np
-import pandas as pd
 
 from config.settings import settings
 from src.alerts.email_alerts import send_alert
@@ -45,6 +44,7 @@ from src.ml.evaluate import (
     run_walk_forward_evaluation,
 )
 from src.ml.train import (
+    LOCKED_MODEL_TYPE,
     MODEL_TYPE_BASELINE,
     MODEL_TYPE_PRIMARY,
     MODEL_TYPE_XGBOOST,
@@ -56,6 +56,35 @@ from src.ml.train import (
 from src.ml.tune import tune_all
 
 logger = logging.getLogger(__name__)
+
+# Drift statuses that positively confirm predictions are not drifting.
+DRIFT_OK_STATUSES = ("STABLE", "MONITOR")
+
+
+class RetrainAbortedError(RuntimeError):
+    """Required real evaluation data is missing; nothing was selected or promoted."""
+
+
+def _regime_result(eval_report: Any, year_tag: str) -> Optional[tuple]:
+    """(win_rate_pct, base_rate_pct) of the locked model in the regime window, or None if not evaluated."""
+    for wm in eval_report.window_results:
+        if wm.model_type != LOCKED_MODEL_TYPE or year_tag not in f"{wm.window_name} {wm.regime_tag}":
+            continue
+        # No buy-bar signals means win rate is unmeasured; accuracy is not a substitute for it.
+        if wm.precision_at_buy_bar is None:
+            return None
+        return round(wm.precision_at_buy_bar * 100, 1), round(wm.base_rate * 100, 1)
+    return None
+
+
+def _fmt_auc(value: Optional[float]) -> str:
+    return f"{value:.3f}" if value is not None else "N/A"
+
+
+def _fmt_regime(result: Optional[tuple], passed: bool) -> str:
+    if result is None:
+        return "NOT EVALUATED (no data / no buy-bar signals) ❌"
+    return f"Win rate {result[0]:.1f}% vs base {result[1]:.1f}% {'✅' if passed else '❌'}"
 
 
 def is_first_saturday(d: datetime) -> bool:
@@ -126,17 +155,10 @@ def run_automatic_retrain(
     dataset_df = build_ml_dataset()
 
     if dataset_df.empty:
-        # Fallback for testing environments without full DB data
-        from src.features.engineer import FEATURE_COLUMNS
-        from src.ml.dataset import LABEL_COLUMN
-        dates = pd.date_range("2008-01-02", "2026-09-19", freq="B").strftime("%Y-%m-%d").tolist()
-        np.random.seed(42)
-        n_rows = len(dates)
-        data = {"date": dates, "ticker": ["AAPL"] * n_rows}
-        for col in FEATURE_COLUMNS:
-            data[col] = np.random.randn(n_rows)
-        data[LABEL_COLUMN] = np.random.randint(0, 2, size=n_rows)
-        dataset_df = pd.DataFrame(data)
+        raise RetrainAbortedError(
+            "build_ml_dataset() returned no rows. Refusing to train, evaluate or promote on "
+            "synthetic/fabricated data."
+        )
 
     start_date = str(dataset_df["date"].min())
     end_date = str(dataset_df["date"].max())
@@ -145,8 +167,8 @@ def run_automatic_retrain(
     # 3. Hyperparameter tuning (50 trials)
     logger.info("Running hyperparameter auto-tuning (%d trials)...", n_trials)
     tuning_summary = tune_all(dataset_df=dataset_df, n_trials=n_trials, models_dir=mdir)
-    primary_best_auc = tuning_summary.get("primary", {}).get("best_roc_auc", 0.50)
-    xgboost_best_auc = tuning_summary.get("xgboost", {}).get("best_roc_auc", 0.50)
+    primary_best_auc = tuning_summary.get("primary", {}).get("best_roc_auc")
+    xgboost_best_auc = tuning_summary.get("xgboost", {}).get("best_roc_auc")
 
     # 4. Train candidate models
     logger.info("Training candidate models...")
@@ -154,9 +176,9 @@ def run_automatic_retrain(
     baseline_tm = train_model(dataset_df, model_type=MODEL_TYPE_BASELINE)
     xgboost_tm = train_model(dataset_df, model_type=MODEL_TYPE_XGBOOST)
 
-    p_path, _ = save_model(primary_tm, models_dir=mdir)
+    save_model(primary_tm, models_dir=mdir)
     b_path, _ = save_model(baseline_tm, models_dir=mdir)
-    x_path, _ = save_model(xgboost_tm, models_dir=mdir)
+    save_model(xgboost_tm, models_dir=mdir)
 
     # 5. Evaluate on walk-forward folds
     logger.info("Evaluating candidate models on walk-forward folds...")
@@ -165,73 +187,70 @@ def run_automatic_retrain(
         model_types=(MODEL_TYPE_PRIMARY, MODEL_TYPE_BASELINE, MODEL_TYPE_XGBOOST),
     )
 
-    # Find best model candidate from walk-forward summary
+    # Only the locked model type is a promotion candidate; other types are informational.
     summary_by_model = eval_report.summary_by_model
-    best_cand_type = MODEL_TYPE_PRIMARY
-    best_cand_auc = 0.0
-
     for mtype, metrics in summary_by_model.items():
-        auc = float(metrics.get("mean_roc_auc", 0.0))
-        if auc > best_cand_auc:
-            best_cand_auc = auc
-            best_cand_type = mtype
+        logger.info("Walk-forward mean AUC [%s]: %s", mtype, metrics.get("mean_auc"))
 
-    if best_cand_type == MODEL_TYPE_PRIMARY:
-        cand_path = p_path
-    elif best_cand_type == MODEL_TYPE_XGBOOST:
-        cand_path = x_path
-    else:
-        cand_path = b_path
+    locked_auc = summary_by_model.get(LOCKED_MODEL_TYPE, {}).get("mean_auc")
+    if locked_auc is None or not np.isfinite(float(locked_auc)):
+        raise RetrainAbortedError(
+            f"Walk-forward evaluation produced no 'mean_auc' for the locked '{LOCKED_MODEL_TYPE}' model "
+            f"(evaluated types: {sorted(summary_by_model)}). No candidate selected or promoted."
+        )
+    new_auc = float(locked_auc)
+    cand_path = b_path
 
-    new_auc = best_cand_auc if best_cand_auc > 0 else max(primary_best_auc, xgboost_best_auc)
-
-    # 6. Extract regime performance
-    gfc_win_rate, gfc_base_rate = 44.2, 37.8
-    bear_win_rate, bear_base_rate = 44.7, 37.8
-
-    for wm in eval_report.window_results:
-        if "2008" in wm.window_name or "2008" in wm.regime_tag:
-            gfc_base_rate = round(wm.base_rate * 100, 1)
-            gfc_win_rate = round((wm.precision_at_buy_bar or wm.accuracy) * 100, 1)
-        elif "2022" in wm.window_name or "2022" in wm.regime_tag:
-            bear_base_rate = round(wm.base_rate * 100, 1)
-            bear_win_rate = round((wm.precision_at_buy_bar or wm.accuracy) * 100, 1)
-
-    gfc_passed = gfc_win_rate > gfc_base_rate
-    bear_passed = bear_win_rate > bear_base_rate
+    # 6. Extract regime performance of the locked model (missing window => gate not passed)
+    gfc_result = _regime_result(eval_report, "2008")
+    bear_result = _regime_result(eval_report, "2022")
+    gfc_passed = gfc_result is not None and gfc_result[0] > gfc_result[1]
+    bear_passed = bear_result is not None and bear_result[0] > bear_result[1]
     weighted_edge = round((new_auc - 0.50) * 100, 1)
 
-    # 7. Get current active model ROC-AUC
-    prev_auc = 0.571
-    try:
-        active_mod = load_active_model(models_dir=mdir)
-        meta_auc = active_mod.metadata.get("preliminary_test_metrics", {}).get("roc_auc")
-        if meta_auc is not None:
-            prev_auc = float(meta_auc)
-    except Exception:
-        pass
+    # 7. Get current active model ROC-AUC (never substitute a default)
+    active_mod = load_active_model(models_dir=mdir)
+    meta_auc = (active_mod.metadata or {}).get("preliminary_test_metrics", {}).get("roc_auc")
+    if meta_auc is None or not np.isfinite(float(meta_auc)):
+        raise RetrainAbortedError(
+            f"Active model '{active_mod.model_name}' has no recorded ROC-AUC to compare against. "
+            "No candidate promoted."
+        )
+    prev_auc = float(meta_auc)
 
     auc_diff = new_auc - prev_auc
     auc_diff_pct = (auc_diff / prev_auc * 100) if prev_auc > 0 else 0.0
 
-    # 8. PSI Drift check
+    # 8. PSI Drift check — only a positive STABLE/MONITOR reading counts as "not drifting"
     drift_status = detect_prediction_drift()
-    is_drift_red = drift_status.get("status") == "DRIFT_ALERT"
+    drift_label = drift_status.get("status", "UNKNOWN")
+    drift_ok = drift_label in DRIFT_OK_STATUSES
 
     # 9. Safety rules evaluation & Promotion Decision
     min_imp = float(settings.auto_promote_min_improvement)
-    is_promoted = (
-        (auc_diff >= min_imp)
-        and gfc_passed
-        and not is_drift_red
+    # 2022 is the documented capital-preservation veto window (evaluate.py rubric), so it gates too.
+    passes_safety = (auc_diff >= min_imp) and gfc_passed and bear_passed and drift_ok
+    approval_pending = passes_safety and (
+        settings.require_human_approval_for_promotion or settings.model_freeze_enabled
     )
+    is_promoted = passes_safety and not approval_pending
 
-    backup_saved_str = "models/backup/" if is_promoted else "N/A"
+    backup_saved_str = "models/backup/" if is_promoted and settings.auto_retrain_keep_backup else "N/A"
 
-    if is_promoted:
+    if approval_pending:
+        logger.warning(
+            "HUMAN APPROVAL REQUIRED — %s passed safety checks but was not auto-promoted. "
+            "Review results in dashboard and approve manually.", cand_path.name,
+        )
+        alert_msg = (
+            f"🔄 MODEL RETRAINED — AWAITING HUMAN APPROVAL\n"
+            f"Current ROC-AUC: {prev_auc:.3f}\n"
+            f"Candidate ({LOCKED_MODEL_TYPE}) ROC-AUC: {new_auc:.3f}\n"
+            f"Current model retained until approved ✅"
+        )
+    elif is_promoted:
         logger.info("SAFETY CHECKS PASSED — Auto-promoting new model %s (AUC: %.3f -> %.3f, +%.1f%%)",
                     cand_path.name, prev_auc, new_auc, auc_diff_pct)
-        # Always keep backup of previous active model
         if settings.auto_retrain_keep_backup:
             backup_active_model(models_dir=mdir)
 
@@ -265,14 +284,15 @@ def run_automatic_retrain(
     except Exception as exc:
         logger.warning("Telegram notification failed: %s", exc)
 
+    status = "PROMOTED" if is_promoted else ("PENDING_APPROVAL" if approval_pending else "RETAINED")
+
     try:
         send_alert(
-            subject=f"AI Stock Trader: Retrain {'PROMOTED' if is_promoted else 'NO PROMOTION'} ({date_str})",
-            body=alert_msg,
+            subject=f"AI Stock Trader: Retrain {status} ({date_str})",
+            body_text=alert_msg,
         )
     except Exception as exc:
         logger.warning("Email alert failed: %s", exc)
-
     # 11. Write Retraining Report to logs/retrain_YYYY-MM-DD.log
     report_text = f"""═══════════════════════════
 AI STOCK TRADER — MONTHLY RETRAIN REPORT
@@ -283,17 +303,19 @@ Stocks: {len(settings.ticker_list)} tickers
 Training samples: {n_samples:,}
 ═══════════════════════════
 TUNING RESULTS:
-Primary best ROC-AUC: {primary_best_auc:.3f} ({n_trials} trials)
-XGBoost best ROC-AUC: {xgboost_best_auc:.3f} ({n_trials} trials)
+Primary best ROC-AUC: {_fmt_auc(primary_best_auc)} ({n_trials} trials)
+XGBoost best ROC-AUC: {_fmt_auc(xgboost_best_auc)} ({n_trials} trials)
 ═══════════════════════════
 EVALUATION RESULTS:
-2008-2009 GFC: Win rate {gfc_win_rate:.1f}% vs base {gfc_base_rate:.1f}% {"✅" if gfc_passed else "❌"}
-2022 Bear: Win rate {bear_win_rate:.1f}% vs base {bear_base_rate:.1f}% {"✅" if bear_passed else "❌"}
+Candidate (locked model type): {LOCKED_MODEL_TYPE}
+2008-2009 GFC: {_fmt_regime(gfc_result, gfc_passed)}
+2022 Bear: {_fmt_regime(bear_result, bear_passed)}
+Prediction drift: {drift_label} {"✅" if drift_ok else "❌"}
 Overall weighted edge: {weighted_edge:+.1f} pts
 ═══════════════════════════
-PROMOTION DECISION: {"PROMOTED ✅" if is_promoted else "NO PROMOTION ❌"}
+PROMOTION DECISION: {status}
 Previous ROC-AUC: {prev_auc:.3f}
-New ROC-AUC: {new_auc:.3f}
+New ROC-AUC ({LOCKED_MODEL_TYPE}): {new_auc:.3f}
 Improvement: {auc_diff_pct:+.1f}%
 Backup saved: {backup_saved_str}
 ═══════════════════════════"""
@@ -305,7 +327,9 @@ Backup saved: {backup_saved_str}
     logger.info("Saved retrain report to %s", report_file)
 
     return {
-        "status": "PROMOTED" if is_promoted else "RETAINED",
+        "status": status,
+        "candidate_model_type": LOCKED_MODEL_TYPE,
+        "candidate_path": str(cand_path),
         "date": date_str,
         "prev_auc": prev_auc,
         "new_auc": new_auc,
@@ -336,7 +360,13 @@ def main() -> None:
         optuna_trials=args.trials,
     )
 
-    print("\n" + result.get("report_text", f"Status: {result['status']}"))
+    try:
+        report_text = result.get("report_text", "")
+        print("\n" + report_text.encode(
+            "ascii", errors="replace"
+        ).decode("ascii"))
+    except Exception:
+        print("\nRetrain complete. Check logs for details.")
 
 
 if __name__ == "__main__":

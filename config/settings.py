@@ -80,6 +80,63 @@ class Settings(BaseSettings):
         ),
     )
 
+    # ── Indian Market (NSE) ─────────────────────────────────────────────────────
+    india_tickers: list = Field(
+        default=[
+            "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS",
+            "HINDUNILVR.NS", "ITC.NS", "SBIN.NS", "BHARTIARTL.NS", "KOTAKBANK.NS",
+            "LT.NS", "HCLTECH.NS", "AXISBANK.NS", "ASIANPAINT.NS", "MARUTI.NS",
+            "SUNPHARMA.NS", "TITAN.NS", "ULTRACEMCO.NS", "WIPRO.NS", "NESTLEIND.NS",
+            "POWERGRID.NS", "NTPC.NS", "TECHM.NS", "BAJFINANCE.NS", "ONGC.NS"
+        ],
+        description="25 NSE Indian stocks with .NS suffix for Yahoo Finance."
+    )
+    india_initial_capital: float = Field(
+        default=10000.0,
+        description="Initial paper trading capital in INR rupees."
+    )
+    india_benchmark: str = Field(
+        default="^NSEI",
+        description="Nifty 50 index symbol."
+    )
+    india_vix_symbol: str = Field(
+        default="^INDIAVIX",
+        description="India VIX volatility symbol."
+    )
+    india_currency: str = Field(
+        default="INR",
+        description="Currency display for Indian portfolio."
+    )
+    india_pipeline_hour_ist: int = Field(
+        default=16,
+        description="Hour in IST to run Indian pipeline (4 PM after NSE close)."
+    )
+
+    # ── Market Context Helpers ──────────────────────────────────────────────────
+    def get_universe(self, market: str = "US") -> list:
+        """Return the ticker universe for the specified market ('US' or 'INDIA')."""
+        if str(market).strip().upper() == "INDIA":
+            return list(self.india_tickers)
+        return list(self.ticker_list)
+
+    def get_benchmark(self, market: str = "US") -> str:
+        """Return the benchmark symbol for the specified market ('US' or 'INDIA')."""
+        if str(market).strip().upper() == "INDIA":
+            return self.india_benchmark
+        return self.benchmark
+
+    def get_initial_capital(self, market: str = "US") -> float:
+        """Return the initial paper-trading capital for the specified market."""
+        if str(market).strip().upper() == "INDIA":
+            return float(self.india_initial_capital)
+        return float(self.initial_capital)
+
+    def get_currency_symbol(self, market: str = "US") -> str:
+        """Return the currency display symbol for the specified market."""
+        if str(market).strip().upper() == "INDIA":
+            return "₹"
+        return "$"
+
     # ── Prediction label (§1.3) ───────────────────────────────────────────────
     prediction_horizon_days: int = Field(
         default=5,
@@ -94,6 +151,12 @@ class Settings(BaseSettings):
             "(0.01 = +1%).  Set above round-trip cost so a predicted "
             "win is a profitable win, not noise."
         ),
+    )
+
+    use_smart_labels: bool = Field(
+        default=True,
+        description="When True uses smarter reward function that "
+                    "penalizes stop-loss hits during the horizon window."
     )
 
     # ── Entry / exit thresholds (§1.4) ────────────────────────────────────────
@@ -360,6 +423,16 @@ class Settings(BaseSettings):
         description="Number of trading days to halt new buys after a 20-day crash.",
     )
 
+    # Emergency Kill Switch (Freqtrade-inspired)
+    kill_switch_enabled: bool = Field(
+        default=False,
+        description="When True, the daily pipeline is immediately halted before any trading logic runs.",
+    )
+    kill_switch_reason: str = Field(
+        default="",
+        description="Human-readable reason logged when the kill switch is active.",
+    )
+
     # PSI drift protocol (Item 9)
     psi_monitor_threshold: float = Field(
         default=0.10,
@@ -562,6 +635,13 @@ class Settings(BaseSettings):
     )
 
     # ── Section 8 Item 3: Trailing Stop Loss ──────────────────────────────────
+    trailing_stop_enabled: bool = Field(
+        default=False,
+        description=(
+            "Locked OFF in V1 (CLAUDE.md, PROJECT_PLAN.md): exits use the fixed stop_loss from entry. "
+            "When True, the risk engine also exits at trailing_stop_pct below the highest price since entry."
+        ),
+    )
     trailing_stop_pct: float = Field(
         default=0.08,
         description="Trailing stop-loss percentage (default 0.08 = 8%).",
@@ -619,6 +699,23 @@ class Settings(BaseSettings):
     auto_promote_min_improvement: float = Field(
         default=0.01,
         description="Minimum ROC-AUC improvement required to auto-promote a new model (default +1.0%).",
+    )
+    require_human_approval_for_promotion: bool = Field(
+        default=True,
+        description="When True, models cannot auto-promote. "
+                    "Human must approve via dashboard before "
+                    "new model replaces active model."
+    )
+    model_freeze_enabled: bool = Field(
+        default=True,
+        description="V1 forward-paper freeze. When True, nothing may replace the production "
+                    "active_model.joblib (promotion, bootstrap, rollback), and the daily pipeline refuses "
+                    "to trade unless the active model matches frozen_model_sha256. Retraining still runs "
+                    "and saves candidates. Disabling this is a deliberate, logged human decision.",
+    )
+    frozen_model_sha256: str = Field(
+        default="09a8f688630438e200519d246008918a947d4208295ad7da54fd9256588963dc",
+        description="SHA-256 of the frozen V1 active_model.joblib (see V1_FREEZE_REPORT.md).",
     )
     auto_retrain_keep_backup: bool = Field(
         default=True,
@@ -724,14 +821,39 @@ class Settings(BaseSettings):
         """Target weight per position assuming equal sizing."""
         return self.investable_fraction / self.max_positions
 
+    def get_universe(self, market: str = "US") -> List[str]:
+        """Return ticker universe list for specified market ('US' or 'INDIA')."""
+        if str(market).strip().upper() == "INDIA":
+            return [t.strip() for t in self.india_tickers if t.strip()]
+        return self.ticker_list
+
+    def get_benchmark(self, market: str = "US") -> str:
+        """Return benchmark symbol for specified market ('US' or 'INDIA')."""
+        if str(market).strip().upper() == "INDIA":
+            return self.india_benchmark
+        return self.benchmark
+
+    def get_initial_capital(self, market: str = "US") -> float:
+        """Return starting capital for specified market ('US' or 'INDIA')."""
+        if str(market).strip().upper() == "INDIA":
+            return float(self.india_initial_capital)
+        return float(self.initial_capital)
+
+    def get_currency_symbol(self, market: str = "US") -> str:
+        """Return currency symbol for specified market ('US' or 'INDIA')."""
+        if str(market).strip().upper() == "INDIA":
+            return "₹"
+        return "$"
+
 
 # ── Module-level singleton ─────────────────────────────────────────────────────
 # Import this everywhere: `from config.settings import settings`
 settings = Settings()
 
 
-# ── Sector Mapping for 25-Stock Universe ──────────────────────────────────────
+# ── Sector Mapping for 25-Stock Universe (US & India) ─────────────────────────
 TICKER_SECTOR_MAP: Dict[str, str] = {
+    # US Universe (25)
     "AAPL": "Technology",
     "MSFT": "Technology",
     "NVDA": "Technology",
@@ -757,6 +879,33 @@ TICKER_SECTOR_MAP: Dict[str, str] = {
     "XOM": "Energy",
     "CVX": "Energy",
     "COP": "Energy",
+
+    # Indian Universe (25 NSE)
+    "RELIANCE.NS": "Energy",
+    "TCS.NS": "Technology",
+    "HDFCBANK.NS": "Financials",
+    "INFY.NS": "Technology",
+    "ICICIBANK.NS": "Financials",
+    "HINDUNILVR.NS": "Consumer Staples",
+    "ITC.NS": "Consumer Staples",
+    "SBIN.NS": "Financials",
+    "BHARTIARTL.NS": "Communications",
+    "KOTAKBANK.NS": "Financials",
+    "LT.NS": "Industrials",
+    "HCLTECH.NS": "Technology",
+    "AXISBANK.NS": "Financials",
+    "ASIANPAINT.NS": "Consumer Cyclical",
+    "MARUTI.NS": "Consumer Cyclical",
+    "SUNPHARMA.NS": "Healthcare",
+    "TITAN.NS": "Consumer Cyclical",
+    "ULTRACEMCO.NS": "Industrials",
+    "WIPRO.NS": "Technology",
+    "NESTLEIND.NS": "Consumer Staples",
+    "POWERGRID.NS": "Industrials",
+    "NTPC.NS": "Energy",
+    "TECHM.NS": "Technology",
+    "BAJFINANCE.NS": "Financials",
+    "ONGC.NS": "Energy",
 }
 
 

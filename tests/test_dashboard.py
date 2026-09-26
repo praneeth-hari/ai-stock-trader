@@ -115,8 +115,10 @@ def test_4_trades_and_orders_loaders(clean_db):
     """Verifies trade and order query loaders format DataFrames accurately."""
     from dashboard.data_loader import get_orders_df, get_recent_trades_df
 
-    repository.save_order("2023-11-20", "AAPL", "BUY", 0.0785, 180.0, "QUALIFIED_BUY")
-    repository.save_trade("2023-11-20", "AAPL", "BUY", 0.0785, 180.0, 0.0283, 0.0)
+    from datetime import datetime
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    repository.save_order(today_str, "AAPL", "BUY", 0.0785, 180.0, "QUALIFIED_BUY")
+    repository.save_trade(today_str, "AAPL", "BUY", 0.0785, 180.0, 0.0283, 0.0)
 
     orders = get_orders_df(limit=10)
     assert len(orders) == 1
@@ -263,6 +265,40 @@ def test_9_triggers_execution_and_schema(clean_db):
         assert "equity_curve" in bt_out
 
 
+def test_9b_backtest_trigger_never_uses_model_trained_through_test_period():
+    """The dashboard backtest must resolve a model trained strictly before start_date, not the active model."""
+    import src.backtest.backtest as bt
+    from dashboard.data_loader import run_backtest_trigger
+
+    dates = pd.date_range("2024-02-01", periods=30, freq="B").strftime("%Y-%m-%d").tolist()
+    start_date = dates[10]
+
+    def fake_fetch(ticker, **kwargs):
+        return pd.DataFrame({
+            "date": dates, "open": [100.0] * 30, "high": [101.0] * 30, "low": [99.0] * 30,
+            "close": [100.0] * 30, "volume": [1_000_000] * 30, "ticker": [ticker] * 30,
+        })
+
+    resolved = []
+    real_resolve = bt.resolve_backtest_model
+
+    def spy_resolve(**kwargs):
+        out = real_resolve(**kwargs)
+        resolved.append((kwargs.get("explicit_model"), out))
+        return out
+
+    with patch("src.data.market_data.fetch_ticker_data", side_effect=fake_fetch), \
+         patch.object(bt, "resolve_backtest_model", side_effect=spy_resolve):
+        bt_out = run_backtest_trigger(start_date=start_date, end_date=dates[-1], tickers=["AAPL"])
+
+    explicit_model, (model, is_oos, _) = resolved[0]
+    assert explicit_model is None
+    split = model.metadata.get("split_info", {})
+    train_end = split.get("train_end_date") or split.get("train_dates", [None, None])[1]
+    assert is_oos is True and train_end < start_date
+    assert bt_out["model_out_of_sample"] is True
+
+
 def test_10_v2_model_drift_loader(clean_db):
     """Verifies get_model_drift_summary returns expected fields and handles low data cleanly."""
     from dashboard.data_loader import get_model_drift_summary
@@ -299,5 +335,12 @@ def test_11_v2_portfolio_intelligence_loaders(clean_db):
     assert "pillar_breakdown" in div_summary
     assert "formula_explanation" in div_summary
     assert 0.0 <= div_summary["score"] <= 100.0
+
+
+def test_india_portfolio_settings_display():
+    from config.settings import settings
+    assert len(settings.india_tickers) == 25
+    assert settings.india_initial_capital == 10000.0
+    assert settings.india_benchmark == "^NSEI"
 
 

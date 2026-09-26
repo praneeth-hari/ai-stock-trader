@@ -235,3 +235,44 @@ def test_get_macro_environment_no_crash_on_monday():
 
     assert isinstance(result, MacroEnvironmentResult)
     assert result.macro_regime in ("FAVORABLE", "NEUTRAL", "RESTRICTIVE")
+
+
+def test_historical_replay_no_live_macro_leakage():
+    """
+    Historical replay dates must NOT call live FRED APIs even on Mondays.
+    If no point-in-time record exists, must return baseline defaults without hitting live network.
+    If point-in-time DB cache exists, must consume only that historical record.
+    If force_fetch is requested, observation_end must strictly bound observations on or before simulated date.
+    """
+    historical_monday = "2023-05-15"  # Monday
+
+    # 1. Historical Monday with FRED API key but no DB cache -> must NOT call FRED without force_fetch
+    with patch("src.intelligence.macro.settings") as mock_settings:
+        mock_settings.fred_api_key = "MOCK_KEY"
+        mock_settings.macro_neutral_size_multiplier = 0.80
+        mock_settings.macro_restrictive_size_multiplier = 0.60
+        mock_settings.macro_restrictive_buy_bar_shift = 0.03
+        with patch("src.intelligence.macro.repository.get_latest_macro_indicators", return_value=None):
+            with patch("src.intelligence.macro.fetch_fred_series_latest") as mock_fetch:
+                result = get_macro_environment(historical_monday, force_fetch=False, persist=False)
+                mock_fetch.assert_not_called()
+
+    assert result.macro_regime == "NEUTRAL"
+    assert result.fed_funds_rate == BASELINE_MACRO["fed_funds_rate"]
+    assert result.cpi_yoy == BASELINE_MACRO["cpi_yoy"]
+    assert result.is_cached is True
+    assert result.source_date == "BASELINE_DEFAULT"
+
+    # 2. When force_fetch=True, observation_end must be passed to bound observations
+    with patch("src.intelligence.macro.settings") as mock_settings:
+        mock_settings.fred_api_key = "MOCK_KEY"
+        mock_settings.macro_neutral_size_multiplier = 0.80
+        mock_settings.macro_restrictive_size_multiplier = 0.60
+        mock_settings.macro_restrictive_buy_bar_shift = 0.03
+        with patch("src.intelligence.macro.repository.get_latest_macro_indicators", return_value=None):
+            with patch("src.intelligence.macro.fetch_fred_series_latest", return_value=4.5) as mock_fetch:
+                with patch("src.intelligence.macro.fetch_fred_cpi_yoy", return_value=2.8):
+                    get_macro_environment(historical_monday, force_fetch=True, persist=False)
+                    # Verify observation_end was passed to strictly prevent leakage
+                    for call in mock_fetch.call_args_list:
+                        assert call.kwargs.get("observation_end") == historical_monday

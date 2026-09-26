@@ -353,3 +353,69 @@ def test_14_performance_metrics_calculation(clean_db):
     assert m["win_rate_pct"] == 50.0  # 1 win / 1 loss
     assert m["profit_factor"] == pytest.approx(4.0, abs=0.1)  # 200 / 50
 
+
+def test_drawdown_series_returns_dataframe():
+    from dashboard.data_loader import get_drawdown_series
+    result = get_drawdown_series()
+    assert isinstance(result, pd.DataFrame)
+
+
+# ── Candlestick Chart Tests ──────────────────────────────────────────────────────
+
+def test_15_build_candlestick_chart_structure(clean_db):
+    """Verifies build_candlestick_chart creates a valid Plotly Figure with candlestick and volume traces."""
+    from dashboard.charts import build_candlestick_chart
+
+    ohlcv = pd.DataFrame({
+        "date": pd.date_range("2026-09-01", periods=10, freq="B"),
+        "open": [100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0, 107.0, 108.0, 109.0],
+        "high": [101.0, 102.0, 103.0, 104.0, 105.0, 106.0, 107.0, 108.0, 109.0, 110.0],
+        "low": [99.0, 100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0, 107.0, 108.0],
+        "close": [100.5, 101.5, 102.5, 103.5, 104.5, 105.5, 106.5, 107.5, 108.5, 109.5],
+        "volume": [1_000_000] * 10,
+    })
+
+    fig = build_candlestick_chart(ohlcv, "AAPL")
+    assert fig is not None
+    assert hasattr(fig, "data")
+    # Should have at least candlestick + volume = 2 traces
+    assert len(fig.data) >= 2
+
+    # Check trace types
+    trace_types = [trace.type for trace in fig.data]
+    assert "candlestick" in trace_types
+    assert "bar" in trace_types
+
+    # Check layout properties
+    assert "AAPL" in fig.layout.title.text
+    assert fig.layout.height == 500
+    assert fig.layout.xaxis.rangeslider.visible is False
+
+
+def test_16_get_ohlcv_data_returns_correct_shape(clean_db):
+    """Verifies get_ohlcv_data returns correctly shaped DataFrame from DB."""
+    from dashboard.data_loader import get_ohlcv_data
+    from src.db import repository
+
+    # Seed market data
+    mkt_data = pd.DataFrame([
+        {"date": "2026-09-01", "ticker": "AAPL", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5, "volume": 1_000_000},
+        {"date": "2026-09-02", "ticker": "AAPL", "open": 100.5, "high": 102.0, "low": 100.0, "close": 101.5, "volume": 1_200_000},
+        {"date": "2026-09-03", "ticker": "AAPL", "open": 101.5, "high": 103.0, "low": 101.0, "close": 102.5, "volume": 1_100_000},
+    ])
+    repository.save_market_data(mkt_data)
+
+    df = get_ohlcv_data("AAPL", days=30)
+    assert not df.empty
+    assert list(df.columns) == ["date", "open", "high", "low", "close", "volume"]
+    assert len(df) == 3
+    # Should be sorted by date
+    assert df["date"].iloc[0] < df["date"].iloc[-1]
+
+    # Test with days limit
+    df_limited = get_ohlcv_data("AAPL", days=2)
+    assert len(df_limited) == 2
+
+    # Non-existent ticker returns empty
+    df_empty = get_ohlcv_data("NONEXISTENT", days=30)
+    assert df_empty.empty

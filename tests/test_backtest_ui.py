@@ -160,7 +160,7 @@ def test_run_backtest_lab_trigger_wrapper(mock_market_data, mock_trained_model):
 
     with patch("src.data.market_data.fetch_ticker_data") as mock_fetch, \
          patch("src.data.validation.validate_ticker_data") as mock_val, \
-         patch("src.ml.evaluate.load_active_model", return_value=mock_trained_model):
+         patch("src.backtest.backtest.resolve_backtest_model", return_value=(mock_trained_model, True, None)) as mock_resolve:
 
         mock_fetch.side_effect = lambda ticker, **kwargs: spy_df if ticker == "SPY" else universe_dict.get(ticker, spy_df)
         mock_val.side_effect = lambda raw, ticker: MagicMock(is_valid=True, cleaned_df=raw)
@@ -186,6 +186,8 @@ def test_run_backtest_lab_trigger_wrapper(mock_market_data, mock_trained_model):
         assert "total_return_pct" in res
         assert "equity_curve" in res
         assert "monthly_returns" in res
+        assert mock_resolve.call_args.kwargs["explicit_model"] is None
+        assert mock_resolve.call_args.kwargs["start_date"] == start_date
 
 
 def test_date_range_warning_threshold():

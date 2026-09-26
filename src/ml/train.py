@@ -52,6 +52,8 @@ MODEL_TYPE_PRIMARY: str = "primary"      # HistGradientBoostingClassifier
 MODEL_TYPE_BASELINE: str = "baseline"    # LogisticRegression + StandardScaler
 MODEL_TYPE_XGBOOST: str = "xgboost"      # XGBoost Classifier
 MODEL_TYPE_ENSEMBLE: str = "ensemble"    # VotingClassifier (soft voting over Primary, Baseline, XGBoost)
+# Locked strategy value (CLAUDE.md): the Baseline is the model that is promoted and evaluated.
+LOCKED_MODEL_TYPE: str = MODEL_TYPE_BASELINE
 VALID_MODEL_TYPES = {
     MODEL_TYPE_PRIMARY,
     MODEL_TYPE_BASELINE,
@@ -850,9 +852,10 @@ def rollback_model(models_dir: Optional[Union[str, Path]] = None) -> bool:
     Roll back active model to the previously backed-up model in models/backup/.
     """
     import shutil
-    from src.ml.evaluate import ACTIVE_MODEL_FILENAME, ACTIVE_METADATA_FILENAME
+    from src.ml.evaluate import ACTIVE_MODEL_FILENAME, ACTIVE_METADATA_FILENAME, assert_model_replacement_allowed
 
     target_dir = Path(models_dir) if models_dir is not None else settings.data_models_dir
+    assert_model_replacement_allowed(target_dir, "Rollback")
     backup_dir = target_dir / BACKUP_DIR_NAME
     backup_model_file = backup_dir / BACKUP_MODEL_FILENAME
     backup_meta_file = backup_dir / BACKUP_METADATA_FILENAME
@@ -870,6 +873,62 @@ def rollback_model(models_dir: Optional[Union[str, Path]] = None) -> bool:
 
     logger.info("ROLLBACK SUCCESSFUL: Restored active model from %s to %s", backup_model_file, dest_model)
     return True
+
+
+def get_performance_weights(model_scores: dict) -> dict:
+    """
+    Calculates performance-based weights for ensemble models.
+    Models with higher ROC AUC get proportionally more weight.
+
+    Parameters
+    ----------
+    model_scores : dict
+        Dict of {model_type: roc_auc_score}
+        e.g. {"hgb": 0.65, "lr": 0.55, "xgb": 0.62}
+
+    Returns
+    -------
+    dict of {model_type: weight} where weights sum to 1.0
+    """
+    if not model_scores:
+        return {}
+    total = sum(model_scores.values())
+    if total == 0:
+        equal = 1.0 / len(model_scores)
+        return {k: equal for k in model_scores}
+    return {k: round(v / total, 4) for k, v in model_scores.items()}
+
+
+def get_weighted_ensemble_probability(
+    probabilities: dict,
+    weights: dict,
+) -> float:
+    """
+    Computes weighted ensemble probability from multiple models.
+
+    Parameters
+    ----------
+    probabilities : dict
+        Dict of {model_type: probability}
+        e.g. {"hgb": 0.70, "lr": 0.55, "xgb": 0.65}
+    weights : dict
+        Dict of {model_type: weight} from get_performance_weights()
+
+    Returns
+    -------
+    float: weighted average probability
+    """
+    if not probabilities or not weights:
+        return 0.0
+    total_weight = 0.0
+    weighted_sum = 0.0
+    for model_type, prob in probabilities.items():
+        w = weights.get(model_type, 0.0)
+        weighted_sum += prob * w
+        total_weight += w
+    if total_weight == 0:
+        return float(sum(probabilities.values()) / len(probabilities))
+    return round(weighted_sum / total_weight, 4)
 
 
 def train_and_promote(models_dir: Optional[Union[str, Path]] = None) -> TrainedModel:

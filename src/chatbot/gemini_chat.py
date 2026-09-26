@@ -50,40 +50,41 @@ Model Rankings Today:
 FRIENDLY_ERROR_MSG = "Sorry I am having trouble connecting. Please try again in a moment."
 
 
-def build_live_context_strings() -> Dict[str, str]:
+def build_live_context_strings(market: str = "US") -> Dict[str, str]:
     """
     Gathers live context from the portfolio, trades, risk engine, and ML model.
     """
+    curr_sym = settings.get_currency_symbol(market)
     # 1. Portfolio Data
     try:
-        port = get_portfolio_summary()
+        port = get_portfolio_summary(market=market)
         pos_str_list = []
         for p in port.get("positions", []):
             pos_str_list.append(
-                f"- {p['ticker']}: {p['shares']:.2f} shares @ ${p['entry_price']:.2f} "
-                f"(Current: ${p['current_price']:.2f}, PnL: ${p['unrealized_pnl']:+.2f})"
+                f"- {p['ticker']}: {p['shares']:.2f} shares @ {curr_sym}{p['entry_price']:.2f} "
+                f"(Current: {curr_sym}{p['current_price']:.2f}, PnL: {curr_sym}{p['unrealized_pnl']:+.2f})"
             )
         pos_str = "\n".join(pos_str_list) if pos_str_list else "No open positions (100% Cash)."
 
         portfolio_data = (
-            f"Total Equity: ${port.get('total_equity', 10000.0):,.2f}\n"
-            f"Cash: ${port.get('cash', 10000.0):,.2f} ({port.get('cash_reserve_pct', 100.0):.1f}%)\n"
+            f"Total Equity: {curr_sym}{port.get('total_equity', 10000.0):,.2f}\n"
+            f"Cash: {curr_sym}{port.get('cash', 10000.0):,.2f} ({port.get('cash_reserve_pct', 100.0):.1f}%)\n"
             f"Open Positions Count: {port.get('open_positions_count', 0)} / {port.get('max_positions', 3)}\n"
             f"Open Positions:\n{pos_str}"
         )
     except Exception as e:
         logger.warning("Error gathering portfolio context: %s", e)
-        portfolio_data = "Portfolio Equity: $10,000.00, Cash: $10,000.00"
+        portfolio_data = f"Portfolio Equity: {curr_sym}10,000.00, Cash: {curr_sym}10,000.00"
 
     # 2. Recent Trades
     try:
-        trades_df = get_recent_trades_df(limit=10)
+        trades_df = get_recent_trades_df(limit=10, market=market)
         if not trades_df.empty:
             tr_lines = []
             for _, r in trades_df.iterrows():
                 tr_lines.append(
                     f"- {r.get('date')}: {r.get('action')} {r.get('shares')} {r.get('ticker')} @ "
-                    f"${r.get('price'):.2f} (Net PnL: ${r.get('net_pnl'):+.2f})"
+                    f"{curr_sym}{r.get('price'):.2f} (Net PnL: {curr_sym}{r.get('net_pnl'):+.2f})"
                 )
             recent_trades = "\n".join(tr_lines)
         else:
@@ -106,7 +107,7 @@ def build_live_context_strings() -> Dict[str, str]:
 
     # 4. Model Rankings Today
     try:
-        regime, preds_df = get_market_regime_and_predictions()
+        regime, preds_df = get_market_regime_and_predictions(market=market)
         regime_status = "Risk-ON" if regime.get("is_risk_on") else "Risk-OFF (SPY < 200d MA)"
         if not preds_df.empty:
             rank_lines = [f"Regime: {regime_status}"]
@@ -132,11 +133,11 @@ def build_live_context_strings() -> Dict[str, str]:
     }
 
 
-def generate_system_prompt() -> str:
+def generate_system_prompt(market: str = "US") -> str:
     """
     Builds the complete System Prompt with live data injected.
     """
-    ctx = build_live_context_strings()
+    ctx = build_live_context_strings(market=market)
     return SYSTEM_PROMPT_TEMPLATE.format(
         portfolio_data=ctx["portfolio_data"],
         recent_trades=ctx["recent_trades"],
@@ -148,6 +149,7 @@ def generate_system_prompt() -> str:
 def ask_gemini_chatbot(
     user_message: str,
     chat_history: Optional[List[Dict[str, str]]] = None,
+    market: str = "US",
     api_key: Optional[str] = None,
     model_name: Optional[str] = None,
 ) -> str:
@@ -179,7 +181,7 @@ def ask_gemini_chatbot(
         from google import genai
 
         client = genai.Client(api_key=key_to_use)
-        system_instruction = generate_system_prompt()
+        system_instruction = generate_system_prompt(market=market)
 
         # Format conversation history if provided
         history_lines = []

@@ -70,6 +70,26 @@ def make_dummy_features(
     return pd.DataFrame(rows)
 
 
+class TestIncompleteFeatures:
+    """A ticker with incomplete features (e.g. newly listed) is skipped for that day only."""
+
+    def test_newly_listed_ticker_is_skipped_and_others_still_scored(self, caplog):
+        feats = make_dummy_features(["AAPL", "NEWCO", "MSFT"], prob_map={"AAPL": 0.70, "NEWCO": 0.90, "MSFT": 0.40})
+        feats.loc[feats.ticker == "NEWCO", "price_to_ma200"] = np.nan  # < 200 bars of history
+        with caplog.at_level("WARNING", logger="src.ranking.ranking"):
+            res = rank_candidates(feats, model=make_mock_model(), run_date="2024-06-14")  # real NaN guard
+        assert [o.ticker for o in res.ranked_opportunities] == ["AAPL", "MSFT"]
+        assert [o.ticker for o in res.top_buy_candidates] == ["AAPL"]
+        assert [o.ticker for o in res.exit_candidates] == ["MSFT"]
+        assert "RANKING SKIP NEWCO" in caplog.text
+
+    def test_no_scoreable_ticker_returns_empty_ranking_instead_of_raising(self):
+        feats = make_dummy_features(["NEWCO"])
+        feats["price_to_ma200"] = np.nan
+        res = rank_candidates(feats, model=make_mock_model(), run_date="2024-06-14")
+        assert res.total_evaluated == 0 and res.ranked_opportunities == [] and res.top_buy_candidates == []
+
+
 class TestRankingOrder:
     def test_1_ranking_order_by_probability(self):
         """Verify candidates are strictly sorted by probability descending."""
@@ -258,3 +278,31 @@ class TestRegimeCheck:
         closes_bear[-1] = 85.0   # Below MA (99.94)
         spy_bear = pd.DataFrame({"date": pd.date_range("2023-01-01", periods=250).strftime("%Y-%m-%d"), "close": closes_bear})
         assert check_market_regime(spy_df=spy_bear) is False
+
+
+# ── Performance Ensemble Integration Tests ────────────────────────────────────
+
+def test_ranking_imports_performance_weights():
+    from src.ml.train import get_performance_weights
+    weights = get_performance_weights({"hgb": 0.65, "lr": 0.55})
+    assert weights["hgb"] > weights["lr"]
+
+
+def test_smart_labels_active_by_default():
+    from config.settings import settings
+    assert settings.use_smart_labels is True
+
+
+# ── India Ranking Tests ───────────────────────────────────────────────────────────
+
+def test_rank_india_stocks_returns_list():
+    from src.ranking.ranking import rank_india_stocks
+    result = rank_india_stocks({})
+    assert isinstance(result, list)
+
+
+def test_rank_india_stocks_empty_data():
+    from src.ranking.ranking import rank_india_stocks
+    import pandas as pd
+    result = rank_india_stocks({"RELIANCE.NS": pd.DataFrame()})
+    assert isinstance(result, list)

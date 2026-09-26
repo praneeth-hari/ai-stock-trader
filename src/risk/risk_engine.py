@@ -508,9 +508,12 @@ def evaluate_portfolio_risk(
             )
             continue
 
-        # Rule 1b: Trailing Stop-Loss — TRIGGERS when current_price <= trailing_stop_price
-        is_trailing_stop_hit = (current_price <= hp.trailing_stop_price) or (pnl_pct <= stop_loss_thresh)
-        if is_trailing_stop_hit:
+        # Rule 1b: Stop-Loss — fixed stop_loss from entry. The trailing stop only applies when
+        # explicitly enabled (locked OFF in V1), so live and backtest positions exit identically
+        # regardless of whether highest_price_since_entry is tracked.
+        fixed_stop_hit = pnl_pct <= stop_loss_thresh
+        trailing_stop_hit = settings.trailing_stop_enabled and current_price <= hp.trailing_stop_price
+        if fixed_stop_hit or trailing_stop_hit:
             gross_proceeds = hp.quantity * current_price
             est_cost = gross_proceeds * settings.simulated_cost_per_trade
             net_proceeds = gross_proceeds - est_cost
@@ -519,10 +522,22 @@ def evaluate_portfolio_risk(
 
             pnl_dollars = (current_price - hp.avg_cost) * hp.quantity
             pnl_dollars_str = f"+${pnl_dollars:,.2f}" if pnl_dollars >= 0 else f"-${abs(pnl_dollars):,.2f}"
-            logger.warning(
-                "TRAILING_STOP_TRIGGERED: %s Sold at: $%.2f Entry: $%.2f Gain locked: %s (%+.1f%%)",
-                ticker, current_price, hp.avg_cost, pnl_dollars_str, pnl_pct * 100.0,
-            )
+            if fixed_stop_hit:
+                logger.warning(
+                    "STOP_LOSS_TRIGGERED: %s Sold at: $%.2f Entry: $%.2f P&L: %s (%+.1f%% <= %.1f%%)",
+                    ticker, current_price, hp.avg_cost, pnl_dollars_str, pnl_pct * 100.0, stop_loss_thresh * 100.0,
+                )
+                stop_details = (
+                    f"Fixed stop-loss exit triggered: PnL {pnl_pct*100.0:+.2f}% <= {stop_loss_thresh*100.0:.1f}% from entry."
+                )
+            else:
+                logger.warning(
+                    "TRAILING_STOP_TRIGGERED: %s Sold at: $%.2f Entry: $%.2f Gain locked: %s (%+.1f%%)",
+                    ticker, current_price, hp.avg_cost, pnl_dollars_str, pnl_pct * 100.0,
+                )
+                stop_details = (
+                    f"Trailing stop-loss exit triggered: price ${current_price:.2f} <= trailing stop ${hp.trailing_stop_price:.2f}."
+                )
             exit_orders.append(
                 RiskDecision(
                     ticker=ticker,
@@ -533,7 +548,7 @@ def evaluate_portfolio_risk(
                     allocated_amount=net_proceeds,
                     pnl_pct=pnl_pct,
                     reason=ExitReason.STOP_LOSS.value,
-                    details=f"Trailing stop-loss exit triggered: price ${current_price:.2f} <= trailing stop ${hp.trailing_stop_price:.2f}.",
+                    details=stop_details,
                 )
             )
             continue

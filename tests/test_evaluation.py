@@ -186,6 +186,26 @@ class TestWalkForwardEmbargo:
         with pytest.raises(ValueError, match="violates the 5-day embargo gap"):
             run_walk_forward_evaluation(ds, windows=invalid_window, gap_days=5)
 
+    def test_standard_crisis_windows_respect_embargo_on_real_trading_calendar(self):
+        """
+        REGRESSION: Window 0A (2008 GFC) used to leave only 4 trading days before its test start
+        (2008-09-01 was Labor Day), so the standard evaluation crashed once 2008 data existed.
+        """
+        holidays = {"2008-09-01", "2011-07-04"}  # NYSE closures inside the 0A / 0B embargo gaps
+        dates = [d for d in pd.bdate_range("2007-06-01", "2011-12-30").strftime("%Y-%m-%d") if d not in holidays]
+        rng = np.random.default_rng(3)
+        ds = pd.concat([pd.DataFrame({
+            "date": dates, "ticker": t,
+            **{c: rng.normal(size=len(dates)) for c in FEATURE_COLUMNS},
+            LABEL_COLUMN: rng.integers(0, 2, len(dates)),
+        }) for t in ("AAA", "BBB")], ignore_index=True)
+
+        windows = define_standard_windows(dates)
+        assert [w["name"] for w in windows][:2] == ["Window 0A (2008-2009 GFC)", "Window 0B (2011 Eurozone / US Downgrade)"]
+
+        report = run_walk_forward_evaluation(ds, windows=windows, model_types=(MODEL_TYPE_BASELINE,), gap_days=5)
+        assert {"Window 0A (2008-2009 GFC)", "Window 0B (2011 Eurozone / US Downgrade)"} <= {w.window_name for w in report.window_results}
+
 
 # ── 4. Human-in-the-Loop Model Promotion Workflow ─────────────────────────────
 

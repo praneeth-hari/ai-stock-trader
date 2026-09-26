@@ -300,3 +300,28 @@ class TestDualModelMetrics:
         # Confirm neither model is automatically promoted
         assert "candidate" in primary.metadata["promotion_status"]
         assert "candidate" in baseline.metadata["promotion_status"]
+
+
+# ── Performance-Based Ensemble Weighting Tests ───────────────────────────────────
+
+def test_get_performance_weights_proportional():
+    from src.ml.train import get_performance_weights
+    scores = {"hgb": 0.60, "lr": 0.40}
+    weights = get_performance_weights(scores)
+    assert abs(sum(weights.values()) - 1.0) < 0.01
+    assert weights["hgb"] > weights["lr"]
+
+
+def test_get_performance_weights_equal_fallback():
+    from src.ml.train import get_performance_weights
+    weights = get_performance_weights({})
+    assert weights == {}
+
+
+def test_weighted_ensemble_probability():
+    from src.ml.train import get_weighted_ensemble_probability
+    probs = {"hgb": 0.70, "lr": 0.50}
+    weights = {"hgb": 0.75, "lr": 0.25}
+    result = get_weighted_ensemble_probability(probs, weights)
+    assert 0.50 < result < 0.70
+    assert isinstance(result, float)

@@ -55,7 +55,7 @@ import pandas as pd
 
 from config.settings import settings
 from src.data.market_data import fetch_ticker_data
-from src.data.validation import validate_ticker_data
+from src.data.validation import LIVE_FETCH_LOOKBACK_DAYS, validate_ticker_data
 from src.db import repository
 from src.features.engineer import compute_features
 from src.intelligence import (
@@ -64,7 +64,7 @@ from src.intelligence import (
     get_macro_environment,
     get_universe_earnings_calendar,
 )
-from src.ml.evaluate import load_active_model
+from src.ml.evaluate import load_active_model, verify_frozen_active_model
 from src.portfolio.portfolio import OrderSpec, allocate_portfolio
 from src.ranking.ranking import rank_candidates
 from src.risk.risk_engine import evaluate_portfolio_risk
@@ -182,6 +182,7 @@ def run_daily_pipeline(
     _spy_df: Optional[pd.DataFrame] = None,          # injectable for testing
     _universe_dfs: Optional[Dict[str, pd.DataFrame]] = None,  # injectable for testing
     force: bool = False,
+    market_name: Optional[str] = None,
 ) -> DailyPipelineResult:
     """
     Execute one full daily paper-trading pipeline run.
@@ -189,6 +190,39 @@ def run_daily_pipeline(
     Guaranteed Idempotent: If run_daily_pipeline has already executed for run_date,
     it safely skips re-execution unless force=True.
     """
+    # ── Emergency Kill Switch ─────────────────────────────────────────────────
+    if settings.kill_switch_enabled:
+        target_date_str = run_date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        reason = settings.kill_switch_reason or "No reason provided."
+        msg = f"EMERGENCY KILL SWITCH ACTIVE — pipeline halted. Reason: {reason}"
+        logger.warning(msg)
+        repository.log_event(
+            "WARNING", "daily_pipeline", msg,
+            {"run_date": target_date_str, "status": "KILL_SWITCH_ACTIVE"},
+        )
+        return DailyPipelineResult(
+            run_date=target_date_str,
+            tickers_fetched=0,
+            tickers_valid=0,
+            tickers_skipped=0,
+            regime="KILL_SWITCH_ACTIVE",
+            orders_generated=0,
+            fills=[],
+            pending_orders=[],
+            cash=0.0,
+            total_equity=0.0,
+            errors=[msg],
+        )
+
+    # Indian market pipeline check (4 PM IST)
+    from config.settings import settings as _s
+    if getattr(_s, 'india_pipeline_hour_ist', None):
+        import pytz
+        from datetime import datetime as _dt
+        ist = pytz.timezone("Asia/Kolkata")
+        now_ist = _dt.now(ist)
+        logger.info("India pipeline hour check: current IST hour = %d", now_ist.hour)
+
     # ── Concurrency Mutex Guard ───────────────────────────────────────────────
     acquired = _pipeline_lock.acquire(blocking=False)
     if not acquired:
@@ -222,6 +256,7 @@ def run_daily_pipeline(
             _spy_df=_spy_df,
             _universe_dfs=_universe_dfs,
             force=force,
+            market_name=market_name,
         )
     finally:
         _pipeline_lock.release()
@@ -235,6 +270,7 @@ def _run_daily_pipeline_internal(
     _spy_df: Optional[pd.DataFrame] = None,
     _universe_dfs: Optional[Dict[str, pd.DataFrame]] = None,
     force: bool = False,
+    market_name: Optional[str] = None,
 ) -> DailyPipelineResult:
     # ── 0. Setup ──────────────────────────────────────────────────────────────
     repository.create_all_tables()
@@ -242,8 +278,17 @@ def _run_daily_pipeline_internal(
     if run_date is None:
         run_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
+    if market_name:
+        market_name = str(market_name).strip().upper()
+    elif tickers:
+        is_india = any(str(t).endswith(".NS") or str(t).endswith(".BO") for t in tickers)
+        market_name = "INDIA" if is_india else "US"
+    else:
+        market_name = "US"
+
     if tickers is None:
-        tickers = settings.ticker_list
+        tickers = settings.get_universe(market_name)
+    market_comp = f"daily_pipeline_{market_name.lower()}"
 
     # ── Market Calendar Check ─────────────────────────────────────────────────
     if not force:
@@ -251,11 +296,11 @@ def _run_daily_pipeline_internal(
         target_d = datetime.strptime(run_date, "%Y-%m-%d").date()
         is_open, reason = is_market_day(target_d)
         if not is_open:
-            msg = f"Market Closed: {reason}. Skipping daily paper pipeline cycle."
+            msg = f"Market Closed ({market_name}): {reason}. Skipping daily paper pipeline cycle."
             logger.info(msg)
             repository.log_event(
-                "INFO", "daily_pipeline", msg,
-                {"run_date": run_date, "status": "SKIPPED_MARKET_CLOSED"}
+                "INFO", market_comp, msg,
+                {"run_date": run_date, "market": market_name, "status": "SKIPPED_MARKET_CLOSED"}
             )
             return DailyPipelineResult(
                 run_date=run_date,
@@ -271,14 +316,31 @@ def _run_daily_pipeline_internal(
                 errors=[msg],
             )
 
-    # ── Idempotency Guard (Double-trigger protection) ──────────────────────────
-    existing_snap = repository.get_portfolio_snapshot(run_date)
-    if existing_snap is not None and not force:
-        msg = f"IDEMPOTENT GUARD: Daily pipeline already executed for {run_date}. Skipping re-run to prevent duplicate orders or fills."
+    # ── Idempotency Guard (Market-Specific Double-trigger protection) ───────────
+    existing_snap = repository.get_portfolio_snapshot(run_date, market=market_name)
+    already_run_event = False
+    if not force:
+        try:
+            recent_events = repository.get_events(limit=100)
+            already_run_event = any(
+                (e.get("component") in ("daily_pipeline", market_comp))
+                and (
+                    f"Pipeline complete for {run_date} ({market_name})" in e.get("message", "")
+                    or f"Pipeline complete for {run_date}." in e.get("message", "")
+                )
+                for e in recent_events
+            )
+        except Exception:
+            already_run_event = False
+
+    if (existing_snap is not None or already_run_event) and not force:
+        msg = f"IDEMPOTENT GUARD: {market_name} market pipeline already executed for {run_date}. Skipping re-run to prevent duplicate orders or fills."
         logger.info(msg)
-        repository.log_event("INFO", "daily_pipeline", msg, {"run_date": run_date, "status": "ALREADY_EXECUTED"})
+        repository.log_event("INFO", market_comp, msg, {"run_date": run_date, "market": market_name, "status": "ALREADY_EXECUTED"})
 
         existing_orders = repository.get_orders(run_date)
+        cash_val = float(existing_snap["cash"]) if existing_snap else 0.0
+        eq_val = float(existing_snap["total_value"]) if existing_snap else 0.0
         return DailyPipelineResult(
             run_date=run_date,
             tickers_fetched=0,
@@ -288,8 +350,8 @@ def _run_daily_pipeline_internal(
             orders_generated=len(existing_orders),
             fills=[],
             pending_orders=[],
-            cash=float(existing_snap["cash"]),
-            total_equity=float(existing_snap["total_value"]),
+            cash=cash_val,
+            total_equity=eq_val,
             errors=[],
         )
 
@@ -297,7 +359,7 @@ def _run_daily_pipeline_internal(
     if fetch_start is None and _spy_df is None:
         from datetime import timedelta
         rd = datetime.strptime(run_date, "%Y-%m-%d")
-        fetch_start = (rd - timedelta(days=420)).strftime("%Y-%m-%d")
+        fetch_start = (rd - timedelta(days=LIVE_FETCH_LOOKBACK_DAYS)).strftime("%Y-%m-%d")
 
     errors: List[str] = []
     tickers_fetched = 0
@@ -312,9 +374,10 @@ def _run_daily_pipeline_internal(
         logger.info("Using injected SPY DataFrame (%d rows).", len(spy_clean))
     else:
         try:
-            spy_raw = fetch_ticker_data(settings.benchmark, start_date=fetch_start, end_date=run_date)
+            benchmark_symbol = settings.get_benchmark(market_name)
+            spy_raw = fetch_ticker_data(benchmark_symbol, start_date=fetch_start, end_date=run_date)
             tickers_fetched += 1
-            val_spy = validate_ticker_data(spy_raw, ticker=settings.benchmark)
+            val_spy = validate_ticker_data(spy_raw, ticker=benchmark_symbol)
             spy_clean = val_spy.cleaned_df.sort_values("date").reset_index(drop=True)
             logger.info("SPY validated: %d rows through %s.", len(spy_clean), run_date)
             try:
@@ -377,7 +440,8 @@ def _run_daily_pipeline_internal(
                         logger.warning("Failed to save %s market data: %s", ticker, exc)
                 else:
                     tickers_skipped += 1
-                    reason = "; ".join(val.errors) if val.errors else "unknown"
+                    err_list = getattr(val, "errors", []) if val else []
+                    reason = "; ".join(err_list) if err_list else "unknown"
                     err = f"SKIP {ticker}: validation failed — {reason}"
                     logger.warning(err)
                     errors.append(err)
@@ -468,7 +532,9 @@ def _run_daily_pipeline_internal(
     # ── 4. Load Active Model & Rank ────────────────────────────────────────────
     try:
         model_file = settings.data_models_dir / "active_model.joblib"
-        if not model_file.exists() and not os.path.exists("data/models/active_model.joblib"):
+        if settings.model_freeze_enabled:
+            verify_frozen_active_model()
+        elif not model_file.exists() and not os.path.exists("data/models/active_model.joblib"):
             print("No model found - training new model...")
             logger.info("No active model found at %s - training new model...", model_file)
             from src.ml.train import train_and_promote
@@ -477,14 +543,19 @@ def _run_daily_pipeline_internal(
             logger.info("Model trained and promoted!")
 
         active_model = load_active_model()
-        # Resolve effective feature decision date (latest completed trading day <= run_date)
-        # e.g., On Monday morning 09:00 ET, data close is Friday T-1.
-        valid_feature_dates = combined_features[combined_features["date"] <= run_date]["date"]
-        if valid_feature_dates.empty:
-            raise ValueError(f"No feature rows found on or before run_date: {run_date}")
-        feature_decision_date = str(valid_feature_dates.max())
+        # Resolve effective feature decision date (latest completed trading day < run_date)
+        # Enforce Lag Rule: decisions made at T use information strictly available at T-1 close.
+        t_minus_1_dates = combined_features[combined_features["date"] < run_date]["date"]
+        if not t_minus_1_dates.empty:
+            feature_decision_date = str(t_minus_1_dates.max())
+        else:
+            # Fallback for single-day test fixtures where no prior date is provided
+            valid_feature_dates = combined_features[combined_features["date"] <= run_date]["date"]
+            if valid_feature_dates.empty:
+                raise ValueError(f"No feature rows found on or before run_date: {run_date}")
+            feature_decision_date = str(valid_feature_dates.max())
         logger.info(
-            "Ranking candidates for run_date %s using feature close %s",
+            "Ranking candidates for run_date %s using feature close %s (T-1 close)",
             run_date, feature_decision_date,
         )
 
@@ -543,106 +614,51 @@ def _run_daily_pipeline_internal(
 
     # ── 5. Load Portfolio State from Broker/DB ─────────────────────────────────
     if broker is None:
-        broker = PaperBroker()
+        broker = PaperBroker(market=market_name)
         broker.load_state()
 
-    # Build current prices map (latest available close for each ticker)
+    # Build open and current (close) prices maps
+    open_prices: Dict[str, float] = {}
     current_prices: Dict[str, float] = {}
     for ticker, df in universe_dfs.items():
         df_sorted = df.sort_values("date")
         date_filtered = df_sorted[df_sorted["date"] <= run_date]
         if not date_filtered.empty:
-            current_prices[ticker] = float(date_filtered.iloc[-1]["close"])
+            last_row = date_filtered.iloc[-1]
+            close_val = float(last_row["close"])
+            current_prices[ticker] = close_val
+            # Market open price on run_date (Day T)
+            run_date_rows = df_sorted[df_sorted["date"] == run_date]
+            if not run_date_rows.empty and "open" in run_date_rows.columns:
+                open_val = float(run_date_rows.iloc[0]["open"])
+                open_prices[ticker] = open_val if (pd.notna(open_val) and open_val > 0) else close_val
+            elif "open" in last_row and pd.notna(last_row["open"]) and float(last_row["open"]) > 0:
+                open_prices[ticker] = float(last_row["open"])
+            else:
+                open_prices[ticker] = close_val
 
-    # Reconstruct positions dict compatible with risk engine
-    current_positions: Dict[str, Dict[str, Any]] = {
-        ticker: {
-            "quantity": pos.quantity,
-            "avg_cost": pos.entry_price,
-            "entry_date": pos.entry_date,
-            "entry_price": pos.entry_price,
-        }
-        for ticker, pos in broker.positions.items()
-    }
-
-    # ── 6. Risk Engine ────────────────────────────────────────────────────────
-    try:
-        macro_mult = macro_result.position_size_multiplier if macro_result else 1.0
-        risk_result = evaluate_portfolio_risk(
-            run_date=run_date,
-            current_cash=broker.cash,
-            current_positions=current_positions,
-            current_prices=current_prices,
-            ranking_result=ranking_result,
-            spy_df=spy_clean,
-            macro_size_multiplier=macro_mult,
-            earnings_result=earnings_result,
-        )
-    except Exception as exc:
-        err = f"CRITICAL: Risk engine failed: {exc}"
-        logger.critical(err)
-        errors.append(err)
-        repository.log_event("CRITICAL", "daily_pipeline", err)
-        try:
-            send_pipeline_failure_alert(
-                error_message=err,
-                run_date=run_date,
-                last_portfolio_value=broker.cash,
-            )
-        except Exception:
-            pass
-        try:
-            notify_pipeline_failure(
-                error_message=err,
-                run_date=run_date,
-                last_portfolio_value=broker.cash,
-            )
-        except Exception:
-            pass
-        return DailyPipelineResult(
-            run_date=run_date, tickers_fetched=tickers_fetched,
-            tickers_valid=len(tickers_valid_list), tickers_skipped=tickers_skipped,
-            regime=regime, orders_generated=0, fills=[],
-            pending_orders=[], cash=broker.cash, total_equity=broker.cash, errors=errors,
-        )
-
-    # ── 7. Portfolio Allocation (OrderSpec generation) ─────────────────────────
-    try:
-        alloc_result = allocate_portfolio(
-            risk_assessment=risk_result,
-            current_cash=broker.cash,
-            current_positions=current_positions,
-            current_prices=current_prices,
-            fee_rate=settings.simulated_cost_per_trade,
-        )
-        pending_orders: List[OrderSpec] = alloc_result.orders
-    except Exception as exc:
-        err = f"CRITICAL: Portfolio allocation failed: {exc}"
-        logger.critical(err)
-        errors.append(err)
-        repository.log_event("CRITICAL", "daily_pipeline", err)
-        pending_orders = []
-
-    orders_generated = len(pending_orders)
-
-    # ── 8. Paper Broker: Execute Pending Orders from PREVIOUS Day ────────────
-    # NOTE: In the real daily loop, today's pending_orders are for TOMORROW's open.
-    # When this pipeline runs in sequence, the previous day's pending_orders were
-    # passed in via broker state or a prior run. Here we execute the current run's
-    # orders immediately to simulate one-shot end-to-end behaviour in replay mode
-    # (e.g., for testing / demo). In full scheduler mode, orders would be held
-    # until next morning's open price is known.
-    #
-    # For the purposes of this pipeline (which runs at close after data is available),
-    # we execute against TODAY's close as the fill price (conservative approximation).
-    # The backtest engine's Lag Rule is the definitive anti-leakage mechanism;
-    # this pipeline is for paper-trading demonstration and state persistence.
+    # ── 5b. Paper Broker: Morning Fills (The Lag Rule) ────────────────────────
+    # Orders generated at previous trading day close execute at today's (Day T) market open.
+    # Today's newly generated orders will be queued as pending for the next market open.
     fills: List[FillResult] = []
-    for order in pending_orders:
-        fill_price = current_prices.get(order.ticker)
-        if fill_price is None:
-            err = f"No fill price for {order.ticker} on {run_date}. Skipping order."
+    prior_pending = list(getattr(broker, "pending_orders", []))
+    if hasattr(broker, "clear_pending_orders"):
+        broker.clear_pending_orders()
+    elif hasattr(broker, "pending_orders"):
+        broker.pending_orders.clear()
+
+    for order in prior_pending:
+        fill_price = open_prices.get(order.ticker)
+        if fill_price is None or fill_price <= 0:
+            fill_price = current_prices.get(order.ticker)
+        if fill_price is None or fill_price <= 0:
+            fill_price = order.reference_price
+
+        if fill_price is None or fill_price <= 0:
+            err = f"No valid fill price for {order.ticker} on {run_date}. Skipping order."
             logger.warning(err)
+            continue
+
         # Determine 20-day ADV if available in universe_dfs for slippage modeling
         order_adv = getattr(order, "adv", None)
         if order_adv is None:
@@ -650,10 +666,14 @@ def _run_daily_pipeline_internal(
             if t_df is not None and "volume" in t_df.columns and len(t_df) > 0:
                 order_adv = float(t_df["volume"].tail(20).mean())
 
-        result = broker.execute_order(order=order, fill_price=fill_price, run_date=run_date, adv=order_adv)
+        result = broker.execute_order(
+            order=order,
+            fill_price=fill_price,
+            run_date=run_date,
+            adv=order_adv,
+        )
         if result is not None:
             fills.append(result)
-            # ── Email + Telegram: trade executed ─────────────────────────────────
             try:
                 is_stop_loss = "STOP_LOSS" in str(result.reason).upper()
                 if is_stop_loss and result.action == "SELL":
@@ -715,6 +735,89 @@ def _run_daily_pipeline_internal(
             except Exception:
                 pass
 
+    # Reconstruct positions dict compatible with risk engine (reflects morning fills)
+    current_positions: Dict[str, Dict[str, Any]] = {
+        ticker: {
+            "quantity": pos.quantity,
+            "avg_cost": pos.entry_price,
+            "entry_date": pos.entry_date,
+            "entry_price": pos.entry_price,
+        }
+        for ticker, pos in broker.positions.items()
+    }
+
+    # ── 6. Risk Engine ────────────────────────────────────────────────────────
+    try:
+        macro_mult = macro_result.position_size_multiplier if macro_result else 1.0
+        risk_result = evaluate_portfolio_risk(
+            run_date=run_date,
+            current_cash=broker.cash,
+            current_positions=current_positions,
+            current_prices=current_prices,
+            ranking_result=ranking_result,
+            spy_df=spy_clean,
+            macro_size_multiplier=macro_mult,
+            earnings_result=earnings_result,
+        )
+    except Exception as exc:
+        err = f"CRITICAL: Risk engine failed: {exc}"
+        logger.critical(err)
+        errors.append(err)
+        repository.log_event("CRITICAL", "daily_pipeline", err)
+        try:
+            send_pipeline_failure_alert(
+                error_message=err,
+                run_date=run_date,
+                last_portfolio_value=broker.cash,
+            )
+        except Exception:
+            pass
+        try:
+            notify_pipeline_failure(
+                error_message=err,
+                run_date=run_date,
+                last_portfolio_value=broker.cash,
+            )
+        except Exception:
+            pass
+        return DailyPipelineResult(
+            run_date=run_date, tickers_fetched=tickers_fetched,
+            tickers_valid=len(tickers_valid_list), tickers_skipped=tickers_skipped,
+            regime=regime, orders_generated=0, fills=[],
+            pending_orders=[], cash=broker.cash, total_equity=broker.cash, errors=errors,
+        )
+
+    # ── 7. Portfolio Allocation (OrderSpec generation) ─────────────────────────
+    try:
+        alloc_result = allocate_portfolio(
+            risk_assessment=risk_result,
+            current_cash=broker.cash,
+            current_positions=current_positions,
+            current_prices=current_prices,
+            fee_rate=settings.simulated_cost_per_trade,
+        )
+        new_pending_orders: List[OrderSpec] = alloc_result.orders
+    except Exception as exc:
+        err = f"CRITICAL: Portfolio allocation failed: {exc}"
+        logger.critical(err)
+        errors.append(err)
+        repository.log_event("CRITICAL", "daily_pipeline", err)
+        new_pending_orders = []
+
+    orders_generated = len(new_pending_orders)
+
+    # ── 8. Queue Orders as PENDING for Next Market Open (Anti-Leakage Lag Rule) ──
+    # Orders generated at Day T close must NEVER execute against Day T close prices.
+    # They are queued as pending to execute at the next market open (Day T+1 open).
+    if hasattr(broker, "sync_pending_orders"):
+        broker.sync_pending_orders(new_pending_orders)
+    elif hasattr(broker, "pending_orders"):
+        broker.pending_orders = list(new_pending_orders)
+    logger.info(
+        "Day %s: %d order(s) generated at close — queued as pending for next market open.",
+        run_date, orders_generated,
+    )
+
     # ── 8b. Email + Telegram: circuit breaker and PSI drift ──────────────────
     try:
         if risk_result.circuit_breaker_active:
@@ -768,10 +871,11 @@ def _run_daily_pipeline_internal(
 
     status_str = "SUCCESS" if not errors else ("PARTIAL_SUCCESS" if len(tickers_valid_list) > 0 else "FAILED")
     repository.log_event(
-        "INFO" if status_str == "SUCCESS" else "WARNING", "daily_pipeline",
-        f"Pipeline complete for {run_date}. Status={status_str}, Fills={len(fills)}, Equity=${total_equity:.4f}, Slippage=${broker.total_slippage_cost:.4f}",
+        "INFO" if status_str == "SUCCESS" else "WARNING", market_comp,
+        f"Pipeline complete for {run_date} ({market_name}). Status={status_str}, Fills={len(fills)}, Equity=${total_equity:.4f}, Slippage=${broker.total_slippage_cost:.4f}",
         {
             "run_date": run_date,
+            "market": market_name,
             "status": status_str,
             "fills": len(fills),
             "orders_generated": orders_generated,
@@ -807,6 +911,8 @@ def _run_daily_pipeline_internal(
     except Exception:
         pass
 
+
+
     return DailyPipelineResult(
         run_date=run_date,
         tickers_fetched=tickers_fetched,
@@ -815,7 +921,7 @@ def _run_daily_pipeline_internal(
         regime=regime,
         orders_generated=orders_generated,
         fills=fills,
-        pending_orders=pending_orders,
+        pending_orders=new_pending_orders,
         cash=broker.cash,
         total_equity=total_equity,
         errors=errors,

@@ -24,9 +24,11 @@ ARCHITECTURE RULE:
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from config.settings import settings
@@ -34,6 +36,16 @@ from src.db import repository
 from src.portfolio.portfolio import OrderSpec
 
 logger = logging.getLogger(__name__)
+
+_pending_orders_cache: Dict[str, List[OrderSpec]] = {}
+
+# Directory holding pending_orders_<market>.json. The test suite redirects this to a temp dir
+# (tests/conftest.py) so tests can never leave orders for the live paper-trading run.
+PENDING_ORDERS_DIR: Path = Path("data")
+
+
+def _pending_orders_path(market: str) -> Path:
+    return Path(PENDING_ORDERS_DIR) / f"pending_orders_{market.lower()}.json"
 
 
 # ── Dataclasses ───────────────────────────────────────────────────────────────
@@ -161,10 +173,12 @@ class PaperBroker:
        to persist the end-of-day mark-to-market snapshot.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, market: str = "US") -> None:
         # Initialised to defaults; load_state() overwrites from DB.
-        self.cash: float = settings.initial_capital
+        self.market: str = str(market).strip().upper()
+        self.cash: float = settings.get_initial_capital(self.market)
         self.positions: Dict[str, Position] = {}
+        self.pending_orders: List[OrderSpec] = []
         self.total_slippage_cost: float = 0.0
         self._state_loaded: bool = False
 
@@ -172,24 +186,26 @@ class PaperBroker:
 
     def load_state(self) -> None:
         """
-        Restore the latest portfolio snapshot from DB.
+        Restore the latest portfolio snapshot for this market ('US' or 'INDIA') from DB.
 
         If no snapshot exists (first ever run), defaults to:
-          - Cash = settings.initial_capital
+          - Cash = settings.get_initial_capital(self.market)
           - Positions = {} (empty)
           - total_slippage_cost = 0.0
         Positions are reconstructed from the snapshot's JSON positions blob,
         which was written by a prior record_snapshot() call.
         """
         repository.create_all_tables()
-        snap = repository.get_latest_portfolio_snapshot()
+        snap = repository.get_latest_portfolio_snapshot(market=self.market)
 
         if snap is None:
-            self.cash = round(settings.initial_capital, 4)
+            self.cash = round(settings.get_initial_capital(self.market), 4)
             self.positions = {}
             self.total_slippage_cost = 0.0
             logger.info(
-                "PaperBroker: No prior snapshot found. Initialising at $%.2f capital.",
+                "PaperBroker [%s]: No prior snapshot found. Initialising at %s%.2f capital.",
+                self.market,
+                settings.get_currency_symbol(self.market),
                 self.cash,
             )
         else:
@@ -213,7 +229,61 @@ class PaperBroker:
                 list(self.positions.keys()),
             )
 
+        if not self.pending_orders:
+            cached = _pending_orders_cache.get(self.market)
+            if cached:
+                self.pending_orders = list(cached)
+            else:
+                self.pending_orders = self._load_pending_orders_file()
+
         self._state_loaded = True
+
+    def sync_pending_orders(self, orders: List[OrderSpec]) -> None:
+        """Update pending orders in memory and in the persistent cache."""
+        self.pending_orders = list(orders)
+        _pending_orders_cache[self.market] = list(orders)
+        self._save_pending_orders_file()
+
+    def clear_pending_orders(self) -> None:
+        """Clear pending orders in memory and in the persistent cache."""
+        self.pending_orders.clear()
+        _pending_orders_cache[self.market] = []
+        self._save_pending_orders_file()
+
+    def _save_pending_orders_file(self) -> None:
+        try:
+            p = _pending_orders_path(self.market)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            orders_data = [o.to_dict() for o in self.pending_orders]
+            p.write_text(json.dumps(orders_data, indent=2))
+        except Exception as exc:
+            logger.debug("Could not save pending orders file: %s", exc)
+
+    def _load_pending_orders_file(self) -> List[OrderSpec]:
+        try:
+            p = _pending_orders_path(self.market)
+            if p.exists():
+                orders_data = json.loads(p.read_text())
+                res = []
+                for d in orders_data:
+                    res.append(OrderSpec(
+                        date=d.get("date", ""),
+                        ticker=d.get("ticker", ""),
+                        action=d.get("action", ""),
+                        order_type=d.get("order_type", "MARKET"),
+                        shares=float(d.get("shares", 0.0)),
+                        reference_price=float(d.get("reference_price", 0.0)),
+                        gross_value=float(d.get("gross_value", 0.0)),
+                        estimated_fee=float(d.get("estimated_fee", 0.0)),
+                        net_amount=float(d.get("net_amount", 0.0)),
+                        reason=d.get("reason", ""),
+                        adv=d.get("adv"),
+                        confidence_tier=d.get("confidence_tier"),
+                    ))
+                return res
+        except Exception as exc:
+            logger.debug("Could not load pending orders file: %s", exc)
+        return []
 
     @property
     def total_equity(self, current_prices: Optional[Dict[str, float]] = None) -> float:
@@ -370,6 +440,7 @@ class PaperBroker:
             quantity=shares,
             price=fill_price,
             reason=order.reason,
+            market=self.market,
         )
         repository.save_trade(
             run_date=run_date,
@@ -380,6 +451,7 @@ class PaperBroker:
             cost=fee,
             net_pnl=0.0,  # PnL is booked on matching SELL
             slippage_cost=slippage_cost,
+            market=self.market,
         )
         repository.log_event(
             level="INFO",
@@ -474,6 +546,7 @@ class PaperBroker:
             quantity=shares,
             price=fill_price,
             reason=order.reason,
+            market=self.market,
         )
         repository.save_trade(
             run_date=run_date,
@@ -484,6 +557,7 @@ class PaperBroker:
             cost=fee,
             net_pnl=net_pnl,
             slippage_cost=slippage_cost,
+            market=self.market,
         )
         repository.log_event(
             level="INFO",
@@ -572,11 +646,121 @@ class PaperBroker:
             total_value=total_equity,
             positions=positions_blob,
             total_slippage_cost=self.total_slippage_cost,
+            market=self.market,
         )
 
         logger.info(
-            "PaperBroker snapshot %s: Cash=%.4f, Positions=%.4f, Total=%.4f, TotalSlippage=%.4f.",
-            run_date, self.cash, position_value, total_equity, self.total_slippage_cost,
+            "PaperBroker [%s] snapshot %s: Cash=%.4f, Positions=%.4f, Total=%.4f, TotalSlippage=%.4f.",
+            self.market, run_date, self.cash, position_value, total_equity, self.total_slippage_cost,
         )
 
         return total_equity
+
+
+# ── IndiaPaperBroker ────────────────────────────────────────────────────────────
+
+class IndiaPaperBroker(PaperBroker):
+    """
+    Paper broker for Indian NSE stocks.
+    Tracks portfolio in INR ₹ (market='INDIA') independently from US portfolio.
+    """
+
+    def __init__(self, initial_capital: Optional[float] = None) -> None:
+        super().__init__(market="INDIA")
+        from src.db import repository
+        cash_db, pos_db = repository.load_india_portfolio()
+        if cash_db is not None:
+            self.cash = float(cash_db)
+            self.positions = pos_db or {}
+        elif initial_capital is not None:
+            self.cash = float(initial_capital)
+        else:
+            self.cash = settings.india_initial_capital
+        self.capital = settings.india_initial_capital
+        self.currency = settings.india_currency
+        self.max_positions = settings.max_positions
+
+    def get_portfolio_summary(self) -> dict:
+        """Returns current Indian portfolio state."""
+        invested = 0.0
+        for p in self.positions.values():
+            qty = p.quantity if hasattr(p, "quantity") else (p.get("quantity", 0) if isinstance(p, dict) else 0)
+            price = p.current_price if hasattr(p, "current_price") else (p.entry_price if hasattr(p, "entry_price") else (p.get("current_price", p.get("entry_price", 0)) if isinstance(p, dict) else 0))
+            invested += qty * price
+        return {
+            "currency": self.currency,
+            "capital": self.capital,
+            "cash": self.cash,
+            "invested": invested,
+            "total_value": self.cash + invested,
+            "profit_loss": (self.cash + invested) - self.capital,
+            "positions": self.positions,
+            "num_positions": len(self.positions),
+        }
+
+    def buy(self, ticker: str, price: float, quantity: float) -> bool:
+        """Simulates buying an NSE stock in INR."""
+        import math
+        # Validate inputs
+        if price is None or quantity is None:
+            return False
+        if isinstance(price, float) and math.isnan(price):
+            return False
+        if isinstance(quantity, float) and math.isnan(quantity):
+            return False
+        if price <= 0 or quantity <= 0:
+            return False
+
+        from config.settings import settings
+        cost = price * quantity * (1 + settings.simulated_cost_per_trade)
+        if cost > self.cash:
+            return False
+        if len(self.positions) >= self.max_positions:
+            return False
+        if ticker in self.positions:
+            return False
+        self.cash -= cost
+        self.positions[ticker] = {
+            "ticker": ticker,
+            "quantity": quantity,
+            "entry_price": price,
+            "current_price": price,
+            "cost": cost,
+        }
+        # Persist to DB
+        from src.db import repository
+        repository.save_india_portfolio(self.cash, self.positions)
+        return True
+
+    def sell(self, ticker: str, price: float) -> bool:
+        """Simulates selling an NSE stock in INR."""
+        import math
+        # Validate inputs
+        if price is None:
+            return False
+        if isinstance(price, float) and math.isnan(price):
+            return False
+        if price <= 0:
+            return False
+
+        from config.settings import settings
+        if ticker not in self.positions:
+            return False
+        pos = self.positions.pop(ticker)
+        qty = pos.quantity if hasattr(pos, "quantity") else (pos["quantity"] if isinstance(pos, dict) else 0)
+        proceeds = price * qty * (1 - settings.simulated_cost_per_trade)
+        self.cash += proceeds
+        # Persist to DB
+        from src.db import repository
+        repository.save_india_portfolio(self.cash, self.positions)
+        return True
+
+    def update_prices(self, prices: dict) -> None:
+        """Updates current prices for all held positions."""
+        for ticker, price in prices.items():
+            if ticker in self.positions:
+                pos = self.positions[ticker]
+                if hasattr(pos, "current_price"):
+                    pos.current_price = price
+                elif isinstance(pos, dict):
+                    pos["current_price"] = price

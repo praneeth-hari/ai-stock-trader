@@ -28,6 +28,7 @@ import streamlit as st
 
 from config.settings import settings
 from dashboard.charts import (
+    build_candlestick_chart,
     build_correlation_heatmap,
     build_daily_returns_histogram,
     build_feature_importance_bar_chart,
@@ -55,6 +56,7 @@ from dashboard.data_loader import (
     get_macro_environment_summary,
     get_market_regime_and_predictions,
     get_model_drift_summary,
+    get_ohlcv_data,
     get_orders_df,
     get_performance_metrics_data,
     get_portfolio_diversification_summary,
@@ -228,6 +230,21 @@ if "dashboard_loaded" not in st.session_state:
     st.session_state["dashboard_loaded"] = True
 
 
+@st.cache_data(ttl=3600)  # cache for 1 hour to avoid hitting yfinance too often
+def get_live_usd_inr_rate() -> float:
+    try:
+        import yfinance as yf
+        # INR=X is the Yahoo Finance ticker for USD to INR exchange rate
+        ticker = yf.Ticker("INR=X")
+        # Use fast_info if available, fallback to history
+        if hasattr(ticker, "fast_info") and "lastPrice" in ticker.fast_info:
+            return float(ticker.fast_info["lastPrice"])
+        else:
+            return float(ticker.history(period="1d")["Close"].iloc[-1])
+    except Exception:
+        return 83.50  # Fallback to a sane default if offline
+
+
 # ── Sidebar: System Info & Trigger Controls ────────────────────────────────────
 
 with st.sidebar:
@@ -238,8 +255,27 @@ with st.sidebar:
     st.info("🛡️ **V1 Security Guarantee**: Paper trading only. No real money or live broker connections exist.")
 
     st.markdown("---")
+    st.subheader("🌐 Active Market View & Currency")
+    if "selected_market" not in st.session_state:
+        st.session_state["selected_market"] = "US"
+
+    selected_market_label = st.radio(
+        "Select Market View:",
+        ["🇺🇸 US Market ($ USD)", "🇮🇳 Indian Market (₹ INR)"],
+        index=0 if st.session_state.get("selected_market") == "US" else 1,
+        help="Switch between US Market ($ USD) and Indian Market (₹ INR) views. All metrics, position tables, predictions, and trades adapt to your selection."
+    )
+    is_india = ("Indian" in selected_market_label or "INR" in selected_market_label)
+    st.session_state["selected_market"] = "INDIA" if is_india else "US"
+
+    curr_sym = "₹" if is_india else "$"
+    live_fx = get_live_usd_inr_rate() if is_india else 1.0
+    fx_rate = live_fx
+
+    st.markdown("---")
     st.subheader("System Configuration")
-    st.markdown(f"**Locked Capital**: `${settings.initial_capital:.2f}`")
+    locked_cap = settings.get_initial_capital(st.session_state["selected_market"]) * (live_fx if (is_india and settings.india_initial_capital == settings.initial_capital) else 1.0)
+    st.markdown(f"**Locked Capital**: `{curr_sym}{locked_cap:,.2f}`")
     st.markdown(f"**Max Positions**: `{settings.max_positions}`")
     st.markdown(f"**Cash Reserve Floor**: `{settings.cash_reserve * 100:.1f}%`")
     st.markdown(f"**Fee per Trade**: `{settings.simulated_cost_per_trade * 100:.2f}%`")
@@ -252,19 +288,26 @@ with st.sidebar:
 
     col_btn1, col_btn2 = st.columns(2)
     with col_btn1:
-        if st.button("▶ Run Paper Cycle", use_container_width=True, help="Executes run_daily_pipeline()"):
-            with st.spinner("Executing daily paper trading pipeline..."):
+        if st.button("▶ Run US Cycle", use_container_width=True, help="Executes US paper trading pipeline"):
+            with st.spinner("Executing US daily paper trading pipeline..."):
                 try:
-                    res = run_daily_paper_cycle_trigger()
-                    st.success(f"Cycle completed for {res['run_date']}! Fills: {res['fills_count']}, Orders: {res['orders_count']}")
+                    res = run_daily_paper_cycle_trigger(market="US")
+                    st.success(f"US cycle completed for {res['run_date']}! Fills: {res['fills_count']}, Orders: {res['orders_count']}")
                     st.session_state["latest_audit_md"] = res["audit_markdown"]
                     st.rerun()
                 except Exception as exc:
                     st.error(f"Pipeline error: {exc}")
 
     with col_btn2:
-        if st.button("🔄 Refresh Data", use_container_width=True):
-            st.rerun()
+        if st.button("▶ Run India Cycle", use_container_width=True, help="Executes Indian NSE paper trading pipeline"):
+            with st.spinner("Executing Indian NSE paper trading pipeline..."):
+                try:
+                    res_in = run_daily_paper_cycle_trigger(market="INDIA")
+                    st.success(f"India cycle completed! Fills: {res_in['fills_count']}, Orders: {res_in['orders_count']}")
+                    st.session_state["latest_audit_md"] = res_in["audit_markdown"]
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"India pipeline error: {exc}")
 
     if st.button("📊 Run Backtest Replay", use_container_width=True, help="Runs historical backtest against SPY"):
         with st.spinner("Running 2021-2024 backtest vs SPY benchmark..."):
@@ -286,23 +329,74 @@ with st.sidebar:
     st.caption(f"Database: `{settings.db_url}`")
 
 
-# ── Main Dashboard Header ──────────────────────────────────────────────────────
+# ── Currency & Display Helpers ──────────────────────────────────────────────────
+
+def fmt_c(val: float | int | None, is_native_inr: bool = False) -> str:
+    if val is None or str(val) == "nan":
+        return "N/A"
+    try:
+        v = float(val) if (is_native_inr or not is_india) else float(val) * fx_rate
+        return f"₹{v:,.2f}" if is_india else f"${v:,.2f}"
+    except Exception:
+        return str(val)
+
+def fmt_c_delta(val: float | int | None, is_native_inr: bool = False) -> str:
+    if val is None or str(val) == "nan":
+        return "N/A"
+    try:
+        v = float(val) if (is_native_inr or not is_india) else float(val) * fx_rate
+        pref = "+" if v > 0 else ""
+        return f"₹{pref}{v:,.2f}" if is_india else f"${pref}{v:,.2f}"
+    except Exception:
+        return str(val)
+
+def is_indian_ticker(t: str) -> bool:
+    st_t = str(t).strip().upper()
+    return st_t.endswith(".NS") or st_t.endswith(".BO") or st_t in ("^NSEI", "^BSESN", "^INDIAVIX")
+
+
+# ── Main Dashboard Header & Market Banner ──────────────────────────────────────
 
 st.title("📈 AI Stock Trader — Operator Monitoring Dashboard")
 st.markdown("Automated algorithmic trading system running daily paper cycles with strict capital preservation rules.")
-st.info("📱 Trading pipeline running on GitHub. Check Telegram for live updates!")
+
+if is_india:
+    st.markdown(f"""
+    <div style="background: rgba(255, 152, 0, 0.15); border: 1px solid #ff9800; border-radius: 8px; padding: 12px 18px; margin-bottom: 20px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px;">
+        <div>
+            <span style="font-weight: 700; color: #ff9800; font-size: 16px;">🇮🇳 INDIAN MARKET VIEW ACTIVE (NSE)</span>
+            <div style="font-size: 13px; color: #bbb; margin-top: 4px;">Tracking 25 NSE Tickers (.NS) | Benchmark: Nifty 50 (^NSEI)</div>
+        </div>
+        <span style="font-size: 14px; color: #e0e0e0; background: #1e222d; padding: 6px 14px; border-radius: 6px; border: 1px solid #2a2e39;">
+            Display Currency: <b style="color:#ff9800;">₹ INR</b> &nbsp;•&nbsp; FX Rate: <b>1 USD = ₹{live_fx:.2f} INR</b>
+        </span>
+    </div>
+    """, unsafe_allow_html=True)
+else:
+    st.markdown("""
+    <div style="background: rgba(38, 166, 154, 0.15); border: 1px solid #26a69a; border-radius: 8px; padding: 12px 18px; margin-bottom: 20px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px;">
+        <div>
+            <span style="font-weight: 700; color: #26a69a; font-size: 16px;">🇺🇸 US MARKET VIEW ACTIVE (NYSE/NASDAQ)</span>
+            <div style="font-size: 13px; color: #bbb; margin-top: 4px;">Tracking 25 US Tickers | Benchmark: S&P 500 (SPY)</div>
+        </div>
+        <span style="font-size: 14px; color: #e0e0e0; background: #1e222d; padding: 6px 14px; border-radius: 6px; border: 1px solid #2a2e39;">
+            Display Currency: <b style="color:#26a69a;">$ USD</b> &nbsp;•&nbsp; Benchmark: <b>SPY</b>
+        </span>
+    </div>
+    """, unsafe_allow_html=True)
 
 # Pull live data
 try:
-    portfolio = get_portfolio_summary()
+    portfolio = get_portfolio_summary(market=st.session_state.get("selected_market", "US"))
 except Exception:
     portfolio = None
 
 if portfolio is None:
+    active_mkt_val = st.session_state.get("selected_market", "US")
     port = {
         "run_date": None,
-        "cash": float(settings.initial_capital),
-        "total_equity": float(settings.initial_capital),
+        "cash": float(settings.get_initial_capital(active_mkt_val)),
+        "total_equity": float(settings.get_initial_capital(active_mkt_val)),
         "invested_value": 0.0,
         "total_slippage_cost": 0.0,
         "cash_reserve_pct": 100.0,
@@ -310,51 +404,58 @@ if portfolio is None:
         "max_positions": settings.max_positions,
         "unrealized_pnl_total": 0.0,
         "positions": [],
-        "last_run_status": "System Running on Cloud ✅",
-        "last_run_message": "Trading pipeline running on GitHub. Check Telegram for live updates! 📱",
+        "last_run_status": "System Running ✅",
+        "last_run_message": "Trading pipeline active.",
         "last_run_timestamp": None,
     }
 else:
     port = portfolio
 
-equity_df = get_equity_history_df()
-trades_df = get_recent_trades_df(limit=50)
-orders_df = get_recent_orders_df(limit=50)
-regime_info, preds_df = get_market_regime_and_predictions()
+active_mkt = st.session_state.get("selected_market", "US")
+equity_df = get_equity_history_df(market=active_mkt)
+trades_df = get_recent_trades_df(limit=50, market=st.session_state.get("selected_market", "US"))
+orders_df = get_recent_orders_df(limit=50, market=st.session_state.get("selected_market", "US"))
+active_mkt = st.session_state.get("selected_market", "US")
+regime_info, preds_df = get_market_regime_and_predictions(market=active_mkt)
 events_df = get_system_events_df(limit=100)
+
+# Filter open positions by active market
+all_positions = port.get("positions", [])
+market_positions = [p for p in all_positions if is_indian_ticker(p.get("ticker", ""))] if is_india else [p for p in all_positions if not is_indian_ticker(p.get("ticker", ""))]
+open_pos_count = len(market_positions)
+pnl_raw = sum(p.get("unrealized_pnl", 0.0) for p in market_positions) if market_positions else port.get('unrealized_pnl_total', 0.0)
 
 
 # ── Top Metric Banner ──────────────────────────────────────────────────────────
 
 m1, m2, m3, m4 = st.columns(4)
 with m1:
-    pnl_val = port.get('unrealized_pnl_total', 0.0)
-    pulse_cls = "pulse-green" if pnl_val > 0 else ""
+    pulse_cls = "pulse-green" if pnl_raw > 0 else ""
     if pulse_cls:
         st.markdown(f'<div class="{pulse_cls}" style="border-radius:8px; padding:2px;">', unsafe_allow_html=True)
     st.metric(
-        "Portfolio Value",
-        f"${port['total_equity']:,.2f}",
-        delta=f"${port['unrealized_pnl_total']:+.2f} Today's Change",
-        help="This is all your money combined — both what's invested in stocks and what's sitting as cash.",
+        f"Portfolio Value ({'₹ INR' if is_india else '$ USD'})",
+        fmt_c(port['total_equity']),
+        delta=f"{fmt_c_delta(pnl_raw)} Today's Change",
+        help="Combined portfolio equity (positions value + cash reserve).",
     )
     if pulse_cls:
         st.markdown('</div>', unsafe_allow_html=True)
 with m2:
     st.metric(
-        "Cash",
-        f"${port['cash']:,.2f}",
-        help="Money ready to be invested or kept safe as cash.",
+        f"Cash ({'₹ INR' if is_india else '$ USD'})",
+        fmt_c(port['cash']),
+        help="Uninvested cash available.",
     )
 with m3:
-    pos_text = "None" if port['open_positions_count'] == 0 else f"{port['open_positions_count']} Active"
+    pos_text = "None" if open_pos_count == 0 else f"{open_pos_count} Active"
     st.metric(
-        "Positions",
+        f"Active Positions ({'NSE' if is_india else 'US'})",
         pos_text,
-        help="Active open stock holdings in portfolio.",
+        help=f"Active open stock holdings in {'Indian (NSE)' if is_india else 'US'} market.",
     )
 with m4:
-    status_label = "System Running on Cloud ✅"
+    status_label = "System Running ✅"
     st.metric(
         "Status",
         status_label,
@@ -383,14 +484,26 @@ tab1, tab2, tab3, tab4, tab_perf, tab_lead, tab_lab, tab_tax, tab_ai, tab5, tab6
 
 with tab1:
     st.subheader("Current Portfolio Allocation")
-    
+
+    from src.portfolio.portfolio import get_strategy_dna
+    st.code(f"🧬 {get_strategy_dna()}", language=None)
+
+    # US Stocks being tracked
+    market_name_display = "NSE" if is_india else "US"
+    with st.expander(f"📋 View all 25 {market_name_display} stocks being tracked"):
+        from config.settings import settings as _cfg_dynamic
+        ticker_list = list(_cfg_dynamic.india_tickers if is_india else _cfg_dynamic.ticker_list)
+        us_cols = st.columns(5)
+        for i, ticker in enumerate(ticker_list):
+            us_cols[i % 5].write(f"• {ticker}")
+
     col_alloc1, col_alloc2 = st.columns([1, 2])
     with col_alloc1:
         st.markdown(f"**As of**: `{port['run_date']}`")
-        st.markdown(f"- **Uninvested Cash**: `${port['cash']:.4f}`")
-        st.markdown(f"- **Invested Value**: `${port['invested_value']:.4f}`")
-        st.markdown(f"- **Total Portfolio Value**: `${port['total_equity']:.4f}`")
-        st.markdown(f"- **Total Slippage Incurred**: `${port.get('total_slippage_cost', 0.0):.4f}`")
+        st.markdown(f"- **Uninvested Cash**: `{curr_sym}{port['cash']:.4f}`")
+        st.markdown(f"- **Invested Value**: `{curr_sym}{port['invested_value']:.4f}`")
+        st.markdown(f"- **Total Portfolio Value**: `{curr_sym}{port['total_equity']:.4f}`")
+        st.markdown(f"- **Total Slippage Incurred**: `{curr_sym}{port.get('total_slippage_cost', 0.0):.4f}`")
         st.markdown(f"- **Open Positions**: `{port['open_positions_count']} / {port['max_positions']}` slots occupied")
         
         # Cash reserve visual indicator
@@ -405,11 +518,16 @@ with tab1:
         # Equity Curve History
         st.markdown("**Simulated Equity Curve (Daily Snapshots)**")
         if not equity_df.empty and len(equity_df) > 1:
-            chart_data = equity_df.set_index("date")[["total_value", "cash"]]
-            st.line_chart(chart_data, color=["#2962ff", "#26a69a"])
+            import pandas as pd
+            df = equity_df.copy()
+            df = df[df['date'] >= (pd.Timestamp.now() - pd.Timedelta(days=30)).strftime('%Y-%m-%d')]
+            if df.empty or len(df) < 2:
+                st.info("Portfolio equity curve will appear after a few days of trading.")
+            else:
+                chart_data = df.set_index("date")[["total_value", "cash"]]
+                st.line_chart(chart_data, color=["#2962ff", "#26a69a"])
         else:
-            st.info("Single snapshot recorded. Run daily cycles to build the multi-day equity history curve.")
-
+            st.info("Portfolio equity curve will appear after a few days of trading.")
     # ── Section 6 Item 3: Live Prices Ticker (Currently Held Stocks Only) ─────
     st.markdown("---")
     is_open, market_status_msg = is_us_market_open()
@@ -518,6 +636,24 @@ with tab1:
             pos_df.style.format(fmt),
             use_container_width=True,
         )
+
+        # ── Candlestick Charts for Each Held Position ───────────────────────────
+        st.markdown("---")
+        st.subheader("📊 Position Candlestick Charts (Last 30 Trading Days)")
+        st.caption("Green candles = up days | Red candles = down days | Green ▲ = Buy | Red ▼ = Sell")
+
+        # Get recent trades for markers
+        recent_trades = get_recent_trades_df(limit=200, market=st.session_state.get("selected_market", "US"))
+
+        for pos in port["positions"]:
+            ticker = pos["ticker"]
+            ohlcv_df = get_ohlcv_data(ticker, days=30)
+            if not ohlcv_df.empty:
+                fig = build_candlestick_chart(ohlcv_df, ticker, recent_trades)
+                if fig:
+                    st.plotly_chart(fig, use_container_width=True, key=f"candle_{ticker}")
+            else:
+                st.info(f"No OHLCV data available for {ticker} to render candlestick chart.")
     else:
         st.info("💡 **No active stock positions held.** Cash is a valid position (100% dry powder awaiting qualified conviction setups.)")
 
@@ -529,8 +665,8 @@ with tab1:
     # Sector Breakdown & Diversification Score Cards
     col_sec1, col_sec2 = st.columns([1, 1])
 
-    sec_summary = get_portfolio_sectors_summary()
-    div_summary = get_portfolio_diversification_summary()
+    sec_summary = get_portfolio_sectors_summary(market=st.session_state.get("selected_market", "US"))
+    div_summary = get_portfolio_diversification_summary(market=st.session_state.get("selected_market", "US"))
 
     with col_sec1:
         st.markdown("#### Sector Exposure & Concentration")
@@ -597,7 +733,7 @@ with tab2:
     st.subheader("📜 Closed Trade History")
     st.caption("Full scrollable history of completed (bought & sold) pairs. Sorted by Date Sold (newest first).")
 
-    closed_df, summary_metrics, export_df = get_closed_trade_history()
+    closed_df, summary_metrics, export_df = get_closed_trade_history(market=st.session_state.get("selected_market", "US"))
 
     if not closed_df.empty:
         # Summary Row / Metrics cards at top of table
@@ -693,23 +829,24 @@ with tab2:
         open_pos_df = pd.DataFrame(port["positions"])
         base_open_cols = ["ticker", "shares", "entry_price", "current_price", "market_value", "unrealized_pnl", "unrealized_pnl_pct", "size_tier"]
         avail_cols = [c for c in base_open_cols if c in open_pos_df.columns]
+        currency_sym = "₹" if is_india else "$"
         open_rename = {
             "ticker": "Ticker",
             "shares": "Shares Held",
-            "entry_price": "Entry Price ($)",
-            "current_price": "Current Price ($)",
-            "market_value": "Market Value ($)",
-            "unrealized_pnl": "Unrealized PnL ($)",
+            "entry_price": f"Entry Price ({currency_sym})",
+            "current_price": f"Current Price ({currency_sym})",
+            "market_value": f"Market Value ({currency_sym})",
+            "unrealized_pnl": f"Unrealized PnL ({currency_sym})",
             "unrealized_pnl_pct": "Return (%)",
             "size_tier": "Size Tier",
         }
         st.dataframe(
             open_pos_df[avail_cols].rename(columns=open_rename).style.format({
                 "Shares Held": "{:.4f}",
-                "Entry Price ($)": "${:.2f}",
-                "Current Price ($)": "${:.2f}",
-                "Market Value ($)": "${:.2f}",
-                "Unrealized PnL ($)": "${:+.4f}",
+                f"Entry Price ({currency_sym})": currency_sym + "{:.2f}",
+                f"Current Price ({currency_sym})": currency_sym + "{:.2f}",
+                f"Market Value ({currency_sym})": currency_sym + "{:.2f}",
+                f"Unrealized PnL ({currency_sym})": currency_sym + "{:+.4f}",
                 "Return (%)": "{:+.2f}%",
             }),
             use_container_width=True,
@@ -1006,6 +1143,14 @@ with tab4:
     # Check if user clicked Run Backtest button
     bt_data = st.session_state.get("bt_results")
     if bt_data:
+        st.warning("**OPTIMISTIC — real results likely worse.** Net of 0.2% costs; no slippage or dividends modelled.")
+        if bt_data.get("survivorship_biased", True):
+            st.warning("**Survivorship-biased universe:** today's surviving stocks applied to past dates.")
+        if bt_data.get("model_out_of_sample") is False:
+            st.error("**NOT out-of-sample:** no model trained before the backtest start was available; results are in-sample.")
+        if bt_data.get("alarm_triggered"):
+            st.error("**Too-good / leakage alarm:** " + "; ".join(bt_data.get("alarm_reasons", [])))
+        st.caption(f"Model used: `{bt_data.get('resolved_model_name', 'unknown')}`")
         # Display Metrics Grid
         b1, b2, b3, b4, b5 = st.columns(5)
         with b1:
@@ -1016,32 +1161,6 @@ with tab4:
             st.metric("Biggest Loss Period", f"{bt_data['max_drawdown']:.2f}%", delta=f"{abs(bt_data['benchmark_max_drawdown']) - abs(bt_data['max_drawdown']):+.2f}% better", delta_color="normal", help="The worst losing streak your portfolio had. -8% means at its worst point you were down $800 from $10,000.")
         with b4:
             st.metric("SPY Biggest Loss Period", f"{bt_data['benchmark_max_drawdown']:.2f}%", help="The worst losing streak of the S&P 500 benchmark during the same period.")
-        with b5:
-            st.metric("Completed Trades", f"{bt_data['total_trades']}", help=f"Win Rate: {bt_data['win_rate']:.1f}% | Profit Factor: {bt_data['profit_factor']:.2f}")
-
-
-
-
-
-# ── Tab 4: Backtest vs SPY Benchmark ──────────────────────────────────────────
-
-with tab4:
-    st.subheader("Historical Backtest vs SPY Benchmark (2021–2024)")
-    st.caption("Realistic simulation with 0.2% per-trade transaction costs and Next-Open morning fill lag rule.")
-
-    # Check if user clicked Run Backtest button
-    bt_data = st.session_state.get("bt_results")
-    if bt_data:
-        # Display Metrics Grid
-        b1, b2, b3, b4, b5 = st.columns(5)
-        with b1:
-            st.metric("Strategy Return", f"{bt_data['cagr']:+.2f}% CAGR", delta=f"{bt_data['cagr'] - bt_data['benchmark_cagr']:+.2f}% vs SPY")
-        with b2:
-            st.metric("SPY Benchmark", f"{bt_data['benchmark_cagr']:+.2f}% CAGR")
-        with b3:
-            st.metric("Strategy Max DD", f"{bt_data['max_drawdown']:.2f}%", delta=f"{abs(bt_data['benchmark_max_drawdown']) - abs(bt_data['max_drawdown']):+.2f}% better", delta_color="normal")
-        with b4:
-            st.metric("SPY Max DD", f"{bt_data['benchmark_max_drawdown']:.2f}%")
         with b5:
             st.metric("Completed Trades", f"{bt_data['total_trades']}", help=f"Win Rate: {bt_data['win_rate']:.1f}% | Profit Factor: {bt_data['profit_factor']:.2f}")
 
@@ -1085,7 +1204,7 @@ with tab_perf:
     st.caption("Institutional-grade visual tracking of portfolio returns, benchmark comparison, trade outcomes, and sector exposure.")
 
     # ── Top Performance Metrics Banner ──────────────────────────────────────────
-    perf_metrics = get_performance_metrics_data()
+    perf_metrics = get_performance_metrics_data(market=st.session_state.get("selected_market", "US"))
 
     sharpe = perf_metrics["sharpe_ratio"]
     max_dd = perf_metrics["max_drawdown_pct"]
@@ -1118,11 +1237,27 @@ with tab_perf:
 
     st.markdown("---")
 
+    st.markdown("### 📉 Drawdown Over Time")
+    from dashboard.data_loader import get_drawdown_series
+    dd_df = get_drawdown_series(market=st.session_state.get("selected_market", "US"))
+    if not dd_df.empty and "date" in dd_df.columns:
+        dd_df["date"] = pd.to_datetime(dd_df["date"])
+        cutoff = pd.Timestamp.now() - pd.Timedelta(days=90)
+        dd_df = dd_df[dd_df["date"] >= cutoff]
+        if len(dd_df) < 2:
+            st.info("Drawdown chart will appear after a few days of real trading data.")
+        else:
+            st.area_chart(dd_df.set_index("date")["drawdown_pct"])
+    else:
+        st.info("No drawdown data available yet.")
+
+    st.markdown("---")
+
     # 1. Portfolio vs SPY Line Chart
     st.markdown("### 1. Portfolio vs SPY Benchmark")
 
     st.caption("Historical equity trajectory compared to SPY buy-and-hold benchmark. Periods of underperformance highlighted in red.")
-    spy_comp_df = get_portfolio_vs_spy_chart_data()
+    spy_comp_df = get_portfolio_vs_spy_chart_data(market=st.session_state.get("selected_market", "US"))
     spy_chart = build_portfolio_vs_spy_chart(spy_comp_df)
     if spy_chart is not None:
         st.altair_chart(spy_chart, use_container_width=True)
@@ -1137,7 +1272,7 @@ with tab_perf:
     with col_p1:
         st.markdown("### 2. Daily Returns Distribution")
         st.caption("Frequency distribution of daily percentage returns. Green = positive days, Red = negative days.")
-        returns_hist_df = get_daily_returns_histogram_data()
+        returns_hist_df = get_daily_returns_histogram_data(market=st.session_state.get("selected_market", "US"))
         hist_chart = build_daily_returns_histogram(returns_hist_df)
         if hist_chart is not None:
             st.altair_chart(hist_chart, use_container_width=True)
@@ -1148,7 +1283,7 @@ with tab_perf:
     with col_p2:
         st.markdown("### 3. Closed Trades Win/Loss Breakdown")
         st.caption("Realized profit/loss per closed trade in chronological order. Green = profit, Red = loss.")
-        win_loss_df = get_win_loss_trades_chart_data()
+        win_loss_df = get_win_loss_trades_chart_data(market=st.session_state.get("selected_market", "US"))
         trade_chart = build_win_loss_trade_chart(win_loss_df)
         if trade_chart is not None:
             st.altair_chart(trade_chart, use_container_width=True)
@@ -1162,7 +1297,7 @@ with tab_perf:
     st.caption("Current breakdown of invested capital across economic sectors alongside cash reserve cushion.")
     col_d1, col_d2 = st.columns([2, 1])
     with col_d1:
-        donut_df = get_sector_allocation_donut_data()
+        donut_df = get_sector_allocation_donut_data(market=st.session_state.get("selected_market", "US"))
         donut_chart = build_sector_allocation_donut(donut_df)
         if donut_chart is not None:
             st.altair_chart(donut_chart, use_container_width=True)
@@ -1171,9 +1306,10 @@ with tab_perf:
     with col_d2:
         st.markdown("#### Allocation Summary")
         if not donut_df.empty:
+            currency_sym = "₹" if is_india else "$"
             st.dataframe(
-                donut_df.rename(columns={"sector": "Component", "value": "Value ($)", "pct": "Weight (%)"}).style.format({
-                    "Value ($)": "${:,.2f}",
+                donut_df.rename(columns={"sector": "Component", "value": f"Value ({currency_sym})", "pct": "Weight (%)"}).style.format({
+                    f"Value ({currency_sym})": currency_sym + "{:,.2f}",
                     "Weight (%)": "{:.1f}%",
                 }),
                 use_container_width=True,
@@ -1185,7 +1321,7 @@ with tab_perf:
     # 5. Position Correlation Heatmap
     st.markdown("### 5. Position Correlation Heatmap")
     st.caption("Pairwise correlation between currently held positions based on 60-day rolling returns (Green = low correlation, Red = high correlation).")
-    corr_matrix_df = get_held_positions_correlation_data()
+    corr_matrix_df = get_held_positions_correlation_data(market=st.session_state.get("selected_market", "US"))
     corr_chart = build_correlation_heatmap(corr_matrix_df)
     if corr_chart is not None:
         st.altair_chart(corr_chart, use_container_width=True)
@@ -1221,6 +1357,11 @@ with tab_lead:
         # Multi-line equity chart
         st.markdown("---")
         st.markdown("#### 📈 Strategy Variants Portfolio Value Over Time")
+        st.markdown("""
+        <style>
+        .stLineChart { background-color: white !important; }
+        </style>
+        """, unsafe_allow_html=True)
         curves_df = get_leaderboard_equity_curves()
         if not curves_df.empty:
             l_chart = build_leaderboard_equity_chart(curves_df)
@@ -1282,7 +1423,8 @@ with tab_lab:
         lab_use_sector = st.toggle("Use sector rotation", value=True)
         lab_use_macro = st.toggle("Use macro regime", value=True)
         lab_use_correlation = st.toggle("Use correlation filter", value=True)
-        lab_use_trailing = st.toggle("Use trailing stop", value=True)
+        lab_use_trailing = st.toggle("Use trailing stop", value=settings.trailing_stop_enabled,
+                                     help="Locked OFF in V1; enable only to experiment.")
 
         st.markdown("---")
         run_lab_btn = st.button("▶ Run Backtest", type="primary", use_container_width=True)
@@ -1312,6 +1454,11 @@ with tab_lab:
         lab_res = st.session_state.get("backtest_lab_result")
 
         if lab_res is not None:
+            st.warning("**OPTIMISTIC — real results likely worse.** Net of 0.2% costs; no slippage or dividends modelled.")
+            if lab_res.get("survivorship_biased", True):
+                st.warning("**Survivorship-biased universe:** today's surviving stocks applied to past dates.")
+            if lab_res.get("model_out_of_sample") is False:
+                st.error(f"**Model leakage:** {lab_res.get('model_leak_reason') or 'model is not out-of-sample'}")
             # 1. Summary Metrics
             st.markdown("#### 1. Summary Metrics")
             m_col1, m_col2, m_col3, m_col4 = st.columns(4)
@@ -1531,7 +1678,7 @@ with tab_ai:
     st.markdown("---")
     for msg in st.session_state["chat_messages"]:
         with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+            st.markdown(msg["content"].replace("$", "\\$"))
 
     # Chat input
     user_input = st.chat_input("Ask anything about your portfolio...")
@@ -1540,15 +1687,17 @@ with tab_ai:
     if prompt_to_process:
         st.session_state["chat_messages"].append({"role": "user", "content": prompt_to_process})
         with st.chat_message("user"):
-            st.markdown(prompt_to_process)
+            st.markdown(prompt_to_process.replace("$", "\\$"))
 
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
                 response_text = ask_chatbot_trigger(
                     user_message=prompt_to_process,
                     chat_history=st.session_state["chat_messages"],
+                    market=st.session_state.get("selected_market", "US"),
                 )
-                st.markdown(response_text)
+                safe_response = response_text.replace("$", "\\$")
+                st.markdown(safe_response)
                 st.session_state["chat_messages"].append({"role": "assistant", "content": response_text})
 
 
@@ -1654,6 +1803,45 @@ with tab5:
             last_run_label = f"🔴 Older ({formatted_run_time})"
     else:
         last_run_label = "🔴 No run recorded"
+
+    # ── Emergency Kill Switch UI ──────────────────────────────────────────────
+    # Load kill switch state from DB on startup
+    from src.db import repository
+    _db_ks_enabled, _db_ks_reason = repository.load_kill_switch_state()
+    if _db_ks_enabled != settings.kill_switch_enabled:
+        settings.kill_switch_enabled = _db_ks_enabled
+        settings.kill_switch_reason = _db_ks_reason
+
+    kill_active = settings.kill_switch_enabled
+
+    st.markdown("### 🚨 Emergency Kill Switch")
+    if kill_active:
+        st.error(
+            f"⛔ KILL SWITCH ACTIVE — All trading halted. "
+            f"Reason: {settings.kill_switch_reason or 'No reason provided.'}"
+        )
+    else:
+        st.success("✅ Kill Switch OFF — Pipeline running normally.")
+
+    col_k1, col_k2 = st.columns(2)
+    with col_k1:
+        if st.button("⛔ ACTIVATE Kill Switch",
+                     disabled=kill_active,
+                     use_container_width=True):
+            settings.kill_switch_enabled = True
+            settings.kill_switch_reason = "Manually activated from dashboard."
+            repository.save_kill_switch_state(True, "Manually activated from dashboard.")
+            st.rerun()
+    with col_k2:
+        if st.button("✅ DEACTIVATE Kill Switch",
+                     disabled=not kill_active,
+                     use_container_width=True):
+            settings.kill_switch_enabled = False
+            settings.kill_switch_reason = ""
+            repository.save_kill_switch_state(False, "")
+            st.rerun()
+
+    st.markdown("---")
 
     # Layout in 2 column grid
     col_health1, col_health2 = st.columns(2)

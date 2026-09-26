@@ -247,3 +247,64 @@ def test_sentiment_network_failure_graceful():
     assert result.sentiment_label == "UNAVAILABLE"
     assert result.modifier == 0.0
     assert result.is_veto is False
+
+
+def test_fingpt_sentiment_bullish():
+    from src.intelligence.sentiment import get_fingpt_sentiment
+    result = get_fingpt_sentiment("Company beats earnings by 20%")
+    assert isinstance(result, dict)
+    assert "score" in result
+    assert "label" in result
+    assert "source" in result
+    assert result["label"] in ["BULLISH", "BEARISH", "NEUTRAL"]
+
+
+def test_fingpt_sentiment_fallback_no_api():
+    from src.intelligence.sentiment import get_fingpt_sentiment
+    import unittest.mock as mock
+    with mock.patch("google.genai.Client") as m:
+        m.side_effect = Exception("API unavailable")
+        result = get_fingpt_sentiment("Market crashes today")
+        assert result["source"] == "vader_fallback"
+        assert result["label"] in ["BULLISH", "BEARISH", "NEUTRAL"]
+
+
+def test_historical_replay_no_live_news_leakage():
+    """
+    Historical replay dates must NOT call live yfinance news APIs.
+    If no point-in-time headlines exist, must return neutral UNAVAILABLE without hitting live network.
+    If point-in-time DB cache exists, must consume only that historical record.
+    """
+    historical_date = "2023-05-15"
+
+    # 1. No cached record -> strictly returns neutral without calling fetch_headlines_for_ticker
+    with patch("src.intelligence.sentiment.repository.get_latest_sentiment_scores", return_value={}):
+        with patch("src.intelligence.sentiment.fetch_headlines_for_ticker") as mock_fetch:
+            res = evaluate_ticker_sentiment("AAPL", historical_date, headlines=None)
+            mock_fetch.assert_not_called()
+
+    assert res.sentiment_label == "UNAVAILABLE"
+    assert res.modifier == 0.0
+    assert res.composite_score == 0.0
+    assert res.is_veto is False
+    assert res.data_source == "HistoricalUnavailable"
+
+    # 2. Point-in-time cached record -> uses historical record without calling live API
+    cached_record = {
+        "AAPL": {
+            "headline_count": 3,
+            "composite_score": 0.45,
+            "sentiment_label": "POSITIVE",
+            "modifier": 0.03,
+            "is_veto": False,
+        }
+    }
+    with patch("src.intelligence.sentiment.repository.get_latest_sentiment_scores", return_value=cached_record):
+        with patch("src.intelligence.sentiment.fetch_headlines_for_ticker") as mock_fetch:
+            res_cached = evaluate_ticker_sentiment("AAPL", historical_date, headlines=None)
+            mock_fetch.assert_not_called()
+
+    assert res_cached.sentiment_label == "POSITIVE"
+    assert res_cached.modifier == 0.03
+    assert res_cached.composite_score == 0.45
+    assert res_cached.data_source == "DBCacheHistorical"

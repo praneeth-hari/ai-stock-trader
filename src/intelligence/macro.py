@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
 import urllib.request
 import urllib.parse
@@ -101,9 +101,14 @@ def classify_macro_regime(
     return "NEUTRAL"
 
 
-def fetch_fred_series_latest(series_id: str, api_key: str) -> Optional[float]:
+def fetch_fred_series_latest(
+    series_id: str,
+    api_key: str,
+    observation_end: Optional[str] = None,
+) -> Optional[float]:
     """
     Fetches the single most recent observation for a given series from FRED REST API.
+    If observation_end is provided, observations are strictly bounded on or before that date.
     """
     if not api_key:
         return None
@@ -115,6 +120,9 @@ def fetch_fred_series_latest(series_id: str, api_key: str) -> Optional[float]:
         "sort_order": "desc",
         "limit": "5",
     }
+    if observation_end:
+        params["observation_end"] = str(observation_end)[:10]
+
     url = f"https://api.stlouisfed.org/fred/series/observations?{urllib.parse.urlencode(params)}"
     
     try:
@@ -131,9 +139,13 @@ def fetch_fred_series_latest(series_id: str, api_key: str) -> Optional[float]:
     return None
 
 
-def fetch_fred_cpi_yoy(api_key: str) -> Optional[float]:
+def fetch_fred_cpi_yoy(
+    api_key: str,
+    observation_end: Optional[str] = None,
+) -> Optional[float]:
     """
     Computes Year-over-Year CPI percentage change from the latest 13 monthly observations.
+    If observation_end is provided, observations are strictly bounded on or before that date.
     """
     if not api_key:
         return None
@@ -144,6 +156,9 @@ def fetch_fred_cpi_yoy(api_key: str) -> Optional[float]:
         "sort_order": "desc",
         "limit": "15",
     }
+    if observation_end:
+        params["observation_end"] = str(observation_end)[:10]
+
     url = f"https://api.stlouisfed.org/fred/series/observations?{urllib.parse.urlencode(params)}"
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "AIStockTrader/1.0"})
@@ -174,15 +189,21 @@ def get_macro_environment(
     except Exception:
         dt = date.today()
 
+    today_date = min(date.today(), datetime.now(timezone.utc).date())
+    is_historical = dt < today_date
     is_monday = (dt.weekday() == 0)
     api_key = settings.fred_api_key
 
-    # Check cached indicators in database first
+    # Check cached indicators in database first (strictly <= as_of_date)
     cached = repository.get_latest_macro_indicators(as_of_date=as_of_date_str[:10])
 
     # Should we fetch live from FRED?
-    # Only if forced or if today is Monday and API key is set
-    should_fetch = (force_fetch or (is_monday and not cached)) and bool(api_key)
+    # In live mode: Mondays if not cached, or if force_fetch is requested.
+    # In historical mode: NEVER fetch live unless force_fetch is explicitly requested.
+    if is_historical:
+        should_fetch = force_fetch and bool(api_key)
+    else:
+        should_fetch = (force_fetch or (is_monday and not cached)) and bool(api_key)
 
     fed_funds: Optional[float] = None
     cpi: Optional[float] = None
@@ -192,11 +213,12 @@ def get_macro_environment(
     used_cache = False
 
     if should_fetch:
-        logger.info("Fetching weekly macroeconomic data from FRED for %s ...", as_of_date_str)
-        fed_funds = fetch_fred_series_latest("FEDFUNDS", api_key)
-        cpi = fetch_fred_cpi_yoy(api_key)
-        unemp = fetch_fred_series_latest("UNRATE", api_key)
-        t10 = fetch_fred_series_latest("DGS10", api_key)
+        obs_end = as_of_date_str[:10]
+        logger.info("Fetching macroeconomic data from FRED as of %s ...", obs_end)
+        fed_funds = fetch_fred_series_latest("FEDFUNDS", api_key, observation_end=obs_end)
+        cpi = fetch_fred_cpi_yoy(api_key, observation_end=obs_end)
+        unemp = fetch_fred_series_latest("UNRATE", api_key, observation_end=obs_end)
+        t10 = fetch_fred_series_latest("DGS10", api_key, observation_end=obs_end)
 
     # If fetch was not attempted or failed, fall back to cached database record
     if fed_funds is None or cpi is None:

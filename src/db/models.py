@@ -134,7 +134,8 @@ class PortfolioSnapshot(Base):
     __tablename__ = "portfolio"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    run_date: Mapped[str] = mapped_column(String(10), nullable=False, unique=True)
+    run_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    market: Mapped[str] = mapped_column(String(10), nullable=False, default="US")
     cash: Mapped[float] = mapped_column(Float, nullable=False)
     total_value: Mapped[float] = mapped_column(Float, nullable=False)
     total_slippage_cost: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
@@ -145,8 +146,12 @@ class PortfolioSnapshot(Base):
         DateTime(timezone=True), default=_utcnow, nullable=False
     )
 
+    __table_args__ = (
+        UniqueConstraint("run_date", "market", name="uq_portfolio_run_date_market"),
+    )
+
     def __repr__(self) -> str:
-        return f"<PortfolioSnapshot {self.run_date} cash={self.cash:.2f} total={self.total_value:.2f}>"
+        return f"<PortfolioSnapshot {self.market} {self.run_date} cash={self.cash:.2f} total={self.total_value:.2f}>"
 
 
 class OrderRow(Base):
@@ -160,6 +165,7 @@ class OrderRow(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     run_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    market: Mapped[Optional[str]] = mapped_column(String(10), nullable=True, default="US")
     ticker: Mapped[str] = mapped_column(String(20), nullable=False)
     action: Mapped[str] = mapped_column(String(10), nullable=False)   # BUY / SELL / HOLD
     quantity: Mapped[float] = mapped_column(Float, nullable=False)
@@ -174,7 +180,7 @@ class OrderRow(Base):
     )
 
     def __repr__(self) -> str:
-        return f"<OrderRow {self.run_date} {self.action} {self.ticker} qty={self.quantity:.4f}>"
+        return f"<OrderRow {self.market} {self.run_date} {self.action} {self.ticker} qty={self.quantity:.4f}>"
 
 
 class TradeRow(Base):
@@ -187,6 +193,7 @@ class TradeRow(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     run_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    market: Mapped[Optional[str]] = mapped_column(String(10), nullable=True, default="US")
     ticker: Mapped[str] = mapped_column(String(20), nullable=False)
     action: Mapped[str] = mapped_column(String(10), nullable=False)   # BUY / SELL
     quantity: Mapped[float] = mapped_column(Float, nullable=False)
@@ -204,7 +211,7 @@ class TradeRow(Base):
 
     def __repr__(self) -> str:
         return (
-            f"<TradeRow {self.run_date} {self.action} {self.ticker} "
+            f"<TradeRow {self.market} {self.run_date} {self.action} {self.ticker} "
             f"qty={self.quantity:.4f} fill={self.fill_price:.2f} pnl={self.net_pnl:.4f}>"
         )
 

@@ -249,11 +249,60 @@ def rank_candidates(
     if eval_df.empty:
         eval_df = df.copy()
 
+    # A ticker with incomplete features (e.g. newly listed, < 200 bars of history) is skipped for
+    # this day only; it must never stop the rest of the universe from being scored.
+    feature_cols = [c for c in FEATURE_COLUMNS if c in eval_df.columns]
+    incomplete = eval_df[feature_cols].isna().any(axis=1)
+    if incomplete.any():
+        for skipped in eval_df.loc[incomplete, "ticker"]:
+            logger.warning(
+                "RANKING SKIP %s on %s: incomplete features (insufficient history) — excluded for this day only.",
+                skipped, decision_date,
+            )
+        eval_df = eval_df[~incomplete].copy()
+    if eval_df.empty:
+        logger.warning(
+            "No tickers with complete features on %s: empty ranking (held positions are still "
+            "managed by the risk engine's price-based exits).", decision_date,
+        )
+        return RankingResult(
+            date=decision_date,
+            regime_risk_on=regime_on,
+            total_evaluated=0,
+            macro_regime=macro_label,
+            effective_buy_bar=effective_buy_bar,
+        )
+
     raw_probs = active_model.predict_proba(eval_df)
     if hasattr(raw_probs, "ndim") and raw_probs.ndim == 2:
         probs = raw_probs[:, 1]
     else:
         probs = raw_probs
+
+    # 4b. Performance-based ensemble weighting (Section 9 Item 4)
+    # If multiple models are available, combine their probabilities using
+    # performance-based weights from walk-forward evaluation.
+    model_probabilities = {active_model.model_type: probs}
+    try:
+        from src.ml.train import get_performance_weights, get_weighted_ensemble_probability
+        from src.db import repository
+        wf_history = repository.get_walk_forward_history()
+        if not wf_history.empty:
+            model_aucs = {}
+            for _, row in wf_history.iterrows():
+                m = row["model_type"]
+                if m not in model_aucs:
+                    model_aucs[m] = []
+                model_aucs[m].append(float(row["roc_auc"]))
+            avg_aucs = {m: sum(v)/len(v) for m, v in model_aucs.items()}
+            weights = get_performance_weights(avg_aucs)
+            if weights and len(model_probabilities) > 1:
+                final_probability = get_weighted_ensemble_probability(
+                    model_probabilities, weights
+                )
+                logger.info("Performance ensemble weights: %s", weights)
+    except Exception as exc:
+        logger.warning("Performance ensemble failed, using default: %s", exc)
 
     # 5. Apply Section 5 Intelligence Modifiers & Log Breakdown
     base_probs_list: List[float] = []
@@ -454,3 +503,71 @@ def rank_candidates(
         macro_regime=macro_label,
         effective_buy_bar=effective_buy_bar,
     )
+
+
+def rank_india_stocks(india_data: dict) -> list:
+    """
+    Ranks Indian NSE stocks using same logic as US stocks.
+    Returns list of dicts with ticker, score, action.
+
+    Parameters
+    ----------
+    india_data : dict
+        Dict of {ticker: DataFrame} from fetch_india_market_data()
+
+    Returns
+    -------
+    list of {ticker, probability, action, price}
+    """
+    from config.settings import settings
+    from src.ml.train import load_model
+    from src.ml.evaluate import ACTIVE_MODEL_FILENAME
+    import numpy as np
+
+    results = []
+
+    try:
+        active_model = load_model(
+            settings.data_models_dir / ACTIVE_MODEL_FILENAME
+        )
+    except Exception as exc:
+        logger.warning("Could not load model for India ranking: %s", exc)
+        return results
+
+    for ticker, df in india_data.items():
+        try:
+            if df.empty or len(df) < 50:
+                continue
+
+            from src.features.engineer import engineer_features
+            features_df = engineer_features(df, ticker=ticker)
+            if features_df.empty:
+                continue
+
+            from src.features.engineer import FEATURE_COLUMNS
+            latest = features_df.tail(1)[FEATURE_COLUMNS]
+            if latest.isnull().any().any():
+                continue
+
+            prob = float(active_model.predict_proba(latest)[0][1])
+
+            if prob >= settings.buy_bar:
+                action = "BUY"
+            elif prob < settings.signal_exit:
+                action = "SELL"
+            else:
+                action = "HOLD"
+
+            results.append({
+                "ticker": ticker,
+                "probability": round(prob, 4),
+                "action": action,
+                "price": float(df["close"].iloc[-1]),
+            })
+
+        except Exception as exc:
+            logger.warning("India ranking failed for %s: %s", ticker, exc)
+            continue
+
+    results.sort(key=lambda x: x["probability"], reverse=True)
+    return results

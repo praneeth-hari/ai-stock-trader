@@ -5,6 +5,8 @@ data/fundamentals/
 data/raw/
 data/processed/
 data/models/
+data/pending_orders_*.json
+data/backtest_cache/
 models/*.pkl
 reports/*.pdf
 reports/*.csv
@@ -38,6 +40,10 @@ htmlcov/
 # ── IDE / editor ──────────────────────────────────────────────────────────────
 .vscode/
 .idea/
+.serena/
+
+# ── Local scratch scripts (root) ──────────────────────────────────────────────
+/fix_test*.py
 *.swp
 *.swo
 *~

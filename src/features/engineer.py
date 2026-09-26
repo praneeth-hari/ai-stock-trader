@@ -135,19 +135,26 @@ def _compute_ticker_features(
     low = df["low"]
     volume = df["volume"]
 
+    # Shift close/high/low/volume by 1 day to avoid look-ahead bias
+    # At market open, today's close/high/low/volume are unknown; use yesterday's values
+    close_lag1 = close.shift(1)
+    high_lag1 = high.shift(1)
+    low_lag1 = low.shift(1)
+    volume_lag1 = volume.shift(1)
+
     feat = pd.DataFrame({"date": df["date"].values, "ticker": df["ticker"].values})
 
     # ── Family A: Trend ────────────────────────────────────────────────────────
 
-    ma_5 = close.rolling(5, min_periods=5).mean()
-    ma_20 = close.rolling(20, min_periods=20).mean()
-    ma_50 = close.rolling(50, min_periods=50).mean()
-    ma_200 = close.rolling(200, min_periods=200).mean()
+    ma_5 = close_lag1.rolling(5, min_periods=5).mean()
+    ma_20 = close_lag1.rolling(20, min_periods=20).mean()
+    ma_50 = close_lag1.rolling(50, min_periods=50).mean()
+    ma_200 = close_lag1.rolling(200, min_periods=200).mean()
 
     # Price relative to MAs (signed % distance: positive = above MA)
-    feat["price_to_ma20"] = (close.values / ma_20.values) - 1
-    feat["price_to_ma50"] = (close.values / ma_50.values) - 1
-    feat["price_to_ma200"] = (close.values / ma_200.values) - 1
+    feat["price_to_ma20"] = (close_lag1.values / ma_20.values) - 1
+    feat["price_to_ma50"] = (close_lag1.values / ma_50.values) - 1
+    feat["price_to_ma200"] = (close_lag1.values / ma_200.values) - 1
 
     # Golden/death cross indicator: 1.0 if ma_5 > ma_20, 0.0 if not, NaN if either is NaN
     feat["ma5_above_ma20"] = np.where(
@@ -158,15 +165,16 @@ def _compute_ticker_features(
 
     # ── Family B: Momentum ─────────────────────────────────────────────────────
     # pct_change(n) = close / close.shift(n) - 1; NaN for first n rows.
-    feat["roc_5"] = close.pct_change(5).values
-    feat["roc_21"] = close.pct_change(21).values
+    # Shift close by 1 first, then compute pct_change to avoid look-ahead
+    feat["roc_5"] = close_lag1.pct_change(5).values
+    feat["roc_21"] = close_lag1.pct_change(21).values
 
     # ── Family C: RSI — Wilder's smoothing ────────────────────────────────────
     # alpha=1/14 with adjust=False is Wilder's exact recursive formula:
     #   avg_gain_t = (avg_gain_{t-1} × 13 + gain_t) / 14
     # min_periods=14 ensures NaN until 14 gain/loss values are available.
     # numpy float arithmetic: x/0 → inf → RSI=100 (all gains);  0/0 → nan (flat)
-    delta = close.diff()
+    delta = close_lag1.diff()
     gain = delta.clip(lower=0)
     loss = (-delta).clip(lower=0)
     avg_gain = gain.ewm(alpha=1 / 14, adjust=False, min_periods=14).mean()
@@ -177,9 +185,9 @@ def _compute_ticker_features(
 
     # ── Family D: MACD — recursive EMA (adjust=False), normalized by close ────
     # Normalized by close price to ensure cross-sectional scale invariance (% of price).
-    ema_12 = close.ewm(span=12, adjust=False, min_periods=12).mean()
-    ema_26 = close.ewm(span=26, adjust=False, min_periods=26).mean()
-    macd_line = (ema_12 - ema_26) / close
+    ema_12 = close_lag1.ewm(span=12, adjust=False, min_periods=12).mean()
+    ema_26 = close_lag1.ewm(span=26, adjust=False, min_periods=26).mean()
+    macd_line = (ema_12 - ema_26) / close_lag1
     macd_signal = macd_line.ewm(span=9, adjust=False, min_periods=9).mean()
     feat["macd_line"] = macd_line.values
     feat["macd_signal"] = macd_signal.values
@@ -188,25 +196,25 @@ def _compute_ticker_features(
     # ── Family E: Volatility ───────────────────────────────────────────────────
 
     # 20-day rolling std of log returns (annualised not needed — raw std is feature)
-    log_ret = np.log(close / close.shift(1))
+    log_ret = np.log(close_lag1 / close_lag1.shift(1))
     feat["vol_20"] = log_ret.rolling(20, min_periods=20).std().values
 
     # ATR: Wilder's 14-period EMA of True Range, normalized by close.
     # True Range = max(H-L, |H-prev_C|, |L-prev_C|)
     # At row 0 prev_close is NaN; max(axis=1, skipna=True) correctly uses only H-L.
-    prev_close = close.shift(1)
+    prev_close = close_lag1.shift(1)
     tr = pd.concat(
-        [high - low, (high - prev_close).abs(), (low - prev_close).abs()],
+        [high_lag1 - low_lag1, (high_lag1 - prev_close).abs(), (low_lag1 - prev_close).abs()],
         axis=1,
     ).max(axis=1)
     atr = tr.ewm(alpha=1 / 14, adjust=False, min_periods=14).mean()
-    feat["atr_14"] = (atr / close).values    # normalized: dimensionless
+    feat["atr_14"] = (atr / close_lag1).values    # normalized: dimensionless
 
     # ── Family F: Volume ───────────────────────────────────────────────────────
-    vol_ma5 = volume.rolling(5, min_periods=5).mean()
-    vol_ma20 = volume.rolling(20, min_periods=20).mean()
+    vol_ma5 = volume_lag1.rolling(5, min_periods=5).mean()
+    vol_ma20 = volume_lag1.rolling(20, min_periods=20).mean()
     feat["vol_ratio_5_20"] = (vol_ma5 / vol_ma20).values   # < 1 → volume fading
-    feat["vol_spike"] = (volume / vol_ma20).values          # > 1 → unusual activity
+    feat["vol_spike"] = (volume_lag1 / vol_ma20).values    # > 1 → unusual activity
 
     # ── Family G: Relative Strength vs Benchmark ──────────────────────────────
     # CRITICAL: join by date label, NEVER by row position.
@@ -265,7 +273,8 @@ def compute_features(
     spy_roc21: Optional[pd.Series] = None
     if spy_df is not None and not spy_df.empty and "close" in spy_df.columns:
         spy_sorted = spy_df.sort_values("date").reset_index(drop=True)
-        spy_roc21 = spy_sorted.set_index("date")["close"].pct_change(21)
+        # Shift close by 1 to avoid look-ahead bias (today's close unknown at market open)
+        spy_roc21 = spy_sorted.set_index("date")["close"].shift(1).pct_change(21)
         logger.debug("SPY roc_21 computed for %d dates.", len(spy_roc21))
 
     result_frames = []

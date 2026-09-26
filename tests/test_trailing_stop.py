@@ -151,6 +151,13 @@ class TestHeldPositionUpdatePrice:
         assert hp.trailing_stop_price == pytest.approx(101.20)
 
 
+@pytest.fixture
+def trailing_enabled(monkeypatch):
+    """Trailing exits are locked OFF in V1; these tests exercise the optional feature explicitly."""
+    monkeypatch.setattr(settings, "trailing_stop_enabled", True)
+
+
+@pytest.mark.usefixtures("trailing_enabled")
 class TestRiskEngineTrailingStopExit:
 
     def test_trailing_stop_triggers_sell_when_price_at_trail(self, monkeypatch):
@@ -247,6 +254,30 @@ class TestRiskEngineTrailingStopExit:
 
 class TestPaperBrokerTrailingStop:
 
+    def setup_method(self, method):
+        """Clear broker state before each test - use isolated temp DB."""
+        import os
+        import tempfile
+        from src.db import repository
+        from config.settings import settings
+        self._temp_db = tempfile.mktemp(suffix=".db")
+        self._original_db = settings.db_url
+        settings.__dict__["db_url"] = f"sqlite:///{self._temp_db}"
+        repository._engine = None
+        repository.create_all_tables()
+
+    def teardown_method(self, method):
+        """Cleanup after each test."""
+        import os
+        from src.db import repository
+        from config.settings import settings
+        repository._engine = None
+        settings.__dict__["db_url"] = self._original_db
+        try:
+            os.unlink(self._temp_db)
+        except Exception:
+            pass
+
     def _make_buy_order(self, ticker="AAPL", shares=10.0, price=100.0):
         return OrderSpec(
             date="2024-06-14", ticker=ticker, action="BUY", order_type="MARKET",
@@ -259,6 +290,8 @@ class TestPaperBrokerTrailingStop:
         monkeypatch.setattr(settings, "trailing_stop_pct", 0.08)
         broker = PaperBroker()
         broker.load_state()
+        broker.positions.clear()
+        assert broker.positions == {}
         fill = broker.execute_order(self._make_buy_order(), fill_price=100.0, run_date="2024-06-14")
         assert fill is not None
         pos = broker.positions["AAPL"]
@@ -288,6 +321,7 @@ class TestPaperBrokerTrailingStop:
 
     def test_record_snapshot_persists_trailing_stop_in_blob(self, monkeypatch):
         from src.db import repository
+        repository.create_all_tables()
         monkeypatch.setattr(settings, "trailing_stop_pct", 0.08)
         broker = PaperBroker()
         broker.load_state()
@@ -301,6 +335,7 @@ class TestPaperBrokerTrailingStop:
         assert pos_data["highest_price_since_entry"] > 0
 
 
+@pytest.mark.usefixtures("trailing_enabled")
 class TestTrailingStopEdgeCases:
 
     def test_trailing_stop_not_triggered_when_price_just_above(self, monkeypatch):
@@ -334,3 +369,40 @@ class TestTrailingStopEdgeCases:
             ranking_result=_ranking_hold_only("AAPL"), spy_df=spy)
         assert len(res.exit_orders) == 1
         assert res.exit_orders[0].action == "SELL"
+
+
+class TestV1TrailingStopLockedOff:
+    """V1 locks trailing stops OFF: paper trading (which tracks a high-water mark) and the backtest
+    (which does not) must make the same fixed -8%-from-entry stop decision with the right reason."""
+
+    # Paper-broker position after a run-up to $130 (trail $119.60) vs. the backtest's plain position.
+    PAPER = {"quantity": 10.0, "avg_cost": 100.0, "entry_date": "2024-05-01", "holding_days": 10,
+             "highest_price_since_entry": 130.0, "trailing_stop_price": 119.60}
+    BACKTEST = {"quantity": 10.0, "avg_cost": 100.0, "entry_date": "2024-05-01", "holding_days": 10}
+
+    def _decide(self, pos, price):
+        return evaluate_portfolio_risk(run_date="2024-06-14", current_cash=5000.0,
+            current_positions={"AAPL": dict(pos)}, current_prices={"AAPL": price},
+            ranking_result=_ranking_hold_only("AAPL"), spy_df=_make_spy_df())
+
+    def test_locked_default_is_off(self):
+        assert settings.trailing_stop_enabled is False
+
+    def test_high_water_mark_does_not_trigger_exit(self, caplog):
+        # $110 is below the $119.60 trail but only +10% from entry: no stop, no take-profit.
+        with caplog.at_level(logging.WARNING, logger="src.risk.risk_engine"):
+            paper, backtest = self._decide(self.PAPER, 110.0), self._decide(self.BACKTEST, 110.0)
+        assert paper.exit_orders == [] and backtest.exit_orders == []
+        assert "TRAILING_STOP_TRIGGERED" not in caplog.text
+
+    def test_fixed_stop_same_decision_and_reason_for_paper_and_backtest(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="src.risk.risk_engine"):
+            decisions = [self._decide(pos, 91.5) for pos in (self.PAPER, self.BACKTEST)]
+        for res in decisions:
+            assert [(o.action, o.reason) for o in res.exit_orders] == [("SELL", ExitReason.STOP_LOSS.value)]
+            assert "Fixed stop-loss" in res.exit_orders[0].details
+        assert "STOP_LOSS_TRIGGERED" in caplog.text and "TRAILING_STOP_TRIGGERED" not in caplog.text
+
+        # Just above the -8% floor: both hold.
+        for pos in (self.PAPER, self.BACKTEST):
+            assert self._decide(pos, 92.5).exit_orders == []

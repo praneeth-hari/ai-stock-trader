@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -199,7 +200,7 @@ def evaluate_predictions(
             alarm_acc_thresh * 100.0,
         )
 
-    return {
+    metrics = {
         "base_rate": base_rate,
         "accuracy": acc,
         "roc_auc": auc,
@@ -210,6 +211,17 @@ def evaluate_predictions(
         "edge_over_base_rate": edge,
         "too_good_alarm": too_good,
     }
+
+    if metrics.get("accuracy", 0) > ALARM_ACCURACY_THRESHOLD:
+        logger.warning(
+            "TOO GOOD TO BE TRUE ALARM — accuracy=%.3f exceeds "
+            "threshold %.3f. Possible data leakage. "
+            "Do NOT promote this model.",
+            metrics["accuracy"],
+            ALARM_ACCURACY_THRESHOLD,
+        )
+
+    return metrics
 
 
 def define_standard_windows(unique_dates: List[str]) -> List[Dict[str, str]]:
@@ -226,7 +238,8 @@ def define_standard_windows(unique_dates: List[str]) -> List[Dict[str, str]]:
             "name": "Window 0A (2008-2009 GFC)",
             "train_start": "2008-01-02",
             "train_end": "2008-08-29",
-            "test_start": "2008-09-08",
+            # 2008-09-01 was Labor Day: 09-02..09-08 are the 5 embargo trading days.
+            "test_start": "2008-09-09",
             "test_end": "2009-06-30",
             "regime_tag": "2008-2009 GFC Crisis (Severe Stress)",
         },
@@ -476,6 +489,40 @@ def run_walk_forward_evaluation(
     )
 
 
+class ModelFreezeError(RuntimeError):
+    """Raised when the production active model would be replaced or used unverified during the V1 freeze."""
+
+
+def assert_model_replacement_allowed(target_dir: Union[str, Path], action: str) -> None:
+    """Blocks replacing the PRODUCTION active model while settings.model_freeze_enabled is on.
+    Other model directories (tests, experiments) are unaffected."""
+    if not settings.model_freeze_enabled:
+        return
+    if Path(target_dir).resolve() != Path(settings.data_models_dir).resolve():
+        return
+    msg = (f"MODEL_FREEZE: {action} of the production active model is blocked while "
+           f"model_freeze_enabled=True (V1 forward-paper freeze). Candidates may still be saved.")
+    logger.error(msg)
+    raise ModelFreezeError(msg)
+
+
+def verify_frozen_active_model(models_dir: Optional[Union[str, Path]] = None) -> None:
+    """While frozen, fail loud unless the active model exists and matches settings.frozen_model_sha256."""
+    if not settings.model_freeze_enabled:
+        return
+    path = Path(models_dir if models_dir is not None else settings.data_models_dir) / ACTIVE_MODEL_FILENAME
+    if not path.exists():
+        raise ModelFreezeError(
+            f"MODEL_FREEZE: active model missing at {path}. Refusing to bootstrap a new model while frozen."
+        )
+    expected = settings.frozen_model_sha256.strip().lower()
+    actual = hashlib.sha256(path.read_bytes()).hexdigest()
+    if expected and actual != expected:
+        raise ModelFreezeError(
+            f"MODEL_FREEZE: active model sha256 {actual} does not match frozen {expected}. Refusing to trade."
+        )
+
+
 def promote_model(
     candidate_model_path: Union[str, Path],
     reason: str,
@@ -509,6 +556,7 @@ def promote_model(
         raise FileNotFoundError(f"Candidate model does not exist: {src_joblib}")
 
     target_dir = Path(models_dir) if models_dir is not None else settings.data_models_dir
+    assert_model_replacement_allowed(target_dir, "Promotion")
     target_dir.mkdir(parents=True, exist_ok=True)
 
     dest_joblib = target_dir / ACTIVE_MODEL_FILENAME
@@ -662,4 +710,24 @@ def format_calibrated_confidence(probability: float) -> Dict[str, Any]:
         "brier_score_context": "Active model test Brier score = 0.249 (beats 0.250 random variance).",
         "calibration_note": "Probabilities represent statistical tendencies over 5 days, not certainty. Real edge is ~54-56%.",
     }
+
+
+def get_model_performance_weights(report: EvaluationReport) -> dict:
+    """
+    Extracts ROC AUC scores from evaluation report and returns
+    performance-based weights for ensemble voting.
+    """
+    from src.ml.train import get_performance_weights
+    model_aucs = {}
+    for window in report.window_results:
+        m = window.model_type
+        if m not in model_aucs:
+            model_aucs[m] = []
+        model_aucs[m].append(window.roc_auc)
+    avg_aucs = {
+        m: round(sum(aucs) / len(aucs), 4)
+        for m, aucs in model_aucs.items()
+        if aucs
+    }
+    return get_performance_weights(avg_aucs)
 

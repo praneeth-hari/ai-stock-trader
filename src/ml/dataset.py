@@ -139,6 +139,64 @@ def compute_labels(
     return work[["date", "ticker", FUTURE_CLOSE_COLUMN, FORWARD_RETURN_COLUMN, LABEL_COLUMN]]
 
 
+def create_smart_labels(
+    df: pd.DataFrame,
+    horizon: int = 5,
+    win_threshold: float = 0.01,
+    stop_loss: float = 0.08,
+) -> pd.Series:
+    """
+    Smarter reward function that creates labels considering both:
+    - Stock must rise > win_threshold over horizon days (reward)
+    - Stock must NOT drop > stop_loss before that (risk penalty)
+
+    This teaches the model to avoid risky trades not just find winners.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Must have 'close' column sorted by date ascending.
+    horizon : int
+        Number of days to look forward (default 5).
+    win_threshold : float
+        Minimum return to count as a win (default 0.01 = 1%).
+    stop_loss : float
+        Maximum drawdown before stop loss triggers (default 0.08 = 8%).
+
+    Returns
+    -------
+    pd.Series of int (1 = good trade, 0 = bad trade or stop loss hit)
+    """
+    if df.empty:
+        return pd.Series(dtype=float, index=df.index)
+
+    closes = df["close"].values
+    n = len(closes)
+    labels = []
+    for i in range(n):
+        if i + horizon >= n:
+            labels.append(np.nan)
+            continue
+        entry = closes[i]
+        if entry <= 0:
+            labels.append(0)
+            continue
+        # Check if stop loss hits before horizon
+        stop_hit = False
+        for j in range(i + 1, i + horizon + 1):
+            intraday_drop = (closes[j] - entry) / entry
+            if intraday_drop <= -stop_loss:
+                stop_hit = True
+                break
+        if stop_hit:
+            labels.append(0)
+            continue
+        # Check if win threshold met at horizon
+        final_return = (closes[i + horizon] - entry) / entry
+        labels.append(1 if final_return >= win_threshold else 0)
+    return pd.Series(labels, index=df.index)
+
+
 def check_label_balance(
     df: pd.DataFrame,
     label_col: str = LABEL_COLUMN,
@@ -390,3 +448,26 @@ def build_ml_dataset() -> pd.DataFrame:
         pass
 
     return build_dataset(all_ohlcv, spy_df=spy_df)
+
+
+def train_test_split(df: pd.DataFrame):
+    # 5-day embargo to prevent data leakage
+    from config.settings import settings
+    embargo_days = settings.prediction_horizon_days
+
+    # Remove embargo_days rows around the split point
+    split_idx = int(len(df) * 0.8)
+    embargo_start = split_idx
+    embargo_end = split_idx + embargo_days
+
+    train_df = df.iloc[:embargo_start]
+    test_df = df.iloc[embargo_end:]
+
+    logger.info(
+        "5-day embargo applied: train ends at %s, "
+        "test starts at %s (gap=%d rows)",
+        train_df.index[-1] if len(train_df) > 0 else "N/A",
+        test_df.index[0] if len(test_df) > 0 else "N/A",
+        embargo_days,
+    )
+    return train_df, test_df

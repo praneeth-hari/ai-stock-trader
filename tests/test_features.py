@@ -89,10 +89,10 @@ class TestKnownValues:
         Rows 0-18 must be NaN.
         """
         feat = compute_features(arith_df)
-        assert feat["price_to_ma20"].iloc[:19].isna().all(), "price_to_ma20 rows 0-18 must be NaN"
+        assert feat["price_to_ma20"].iloc[:20].isna().all(), "price_to_ma20 rows 0-19 must be NaN"
         expected = (119.0 / 109.5) - 1.0
-        assert abs(feat["price_to_ma20"].iloc[19] - expected) < 1e-9, (
-            f"price_to_ma20 at row 19: expected {expected}, got {feat['price_to_ma20'].iloc[19]}"
+        assert abs(feat["price_to_ma20"].iloc[20] - expected) < 1e-9, (
+            f"price_to_ma20 at row 20: expected {expected}, got {feat['price_to_ma20'].iloc[20]}"
         )
 
     def test_roc_5_exact_value(self, arith_df):
@@ -101,9 +101,9 @@ class TestKnownValues:
         roc_5 is NaN for rows 0-4.
         """
         feat = compute_features(arith_df)
-        assert feat["roc_5"].iloc[:5].isna().all(), "roc_5 rows 0-4 must be NaN"
-        assert abs(feat["roc_5"].iloc[5] - 0.05) < 1e-9, (
-            f"roc_5 at row 5: expected 0.05, got {feat['roc_5'].iloc[5]}"
+        assert feat["roc_5"].iloc[:6].isna().all(), "roc_5 rows 0-5 must be NaN"
+        assert abs(feat["roc_5"].iloc[6] - 0.05) < 1e-9, (
+            f"roc_5 at row 6: expected 0.05, got {feat['roc_5'].iloc[6]}"
         )
 
     def test_roc_21_exact_value(self, arith_df):
@@ -112,20 +112,21 @@ class TestKnownValues:
         roc_21 is NaN for rows 0-20.
         """
         feat = compute_features(arith_df)
-        assert feat["roc_21"].iloc[:21].isna().all(), "roc_21 rows 0-20 must be NaN"
-        assert abs(feat["roc_21"].iloc[21] - 0.21) < 1e-9, (
-            f"roc_21 at row 21: expected 0.21, got {feat['roc_21'].iloc[21]}"
+        assert feat["roc_21"].iloc[:22].isna().all(), "roc_21 rows 0-21 must be NaN"
+        assert abs(feat["roc_21"].iloc[22] - 0.21) < 1e-9, (
+            f"roc_21 at row 22: expected 0.21, got {feat['roc_21'].iloc[22]}"
         )
 
     def test_vol_spike_constant_volume(self, arith_df):
         """
-        With constant volume = 1,000,000: vol_spike = volume / mean(volume, 20) = 1.0.
-        vol_spike is NaN for rows 0-18 (need 20 volumes for vol_ma20).
+        With constant volume = 1,000,000 and 1-day lag:
+        vol_spike = volume_lag1 / mean(volume_lag1, 20) = 1.0.
+        vol_spike is NaN for rows 0-19 (1-day lag + 19 more for 20-period rolling window).
         """
         feat = compute_features(arith_df)
-        assert feat["vol_spike"].iloc[:19].isna().all(), "vol_spike rows 0-18 must be NaN"
-        # Rows 19-29: all volumes equal → vol_spike = 1.0 exactly
-        valid_spikes = feat["vol_spike"].iloc[19:]
+        assert feat["vol_spike"].iloc[:20].isna().all(), "vol_spike rows 0-19 must be NaN"
+        # Rows 20-29: all volumes equal → vol_spike = 1.0 exactly
+        valid_spikes = feat["vol_spike"].iloc[20:]
         assert (valid_spikes.notna()).all()
         assert (abs(valid_spikes - 1.0) < 1e-9).all(), (
             f"vol_spike expected 1.0 with constant volume, got: {valid_spikes.tolist()}"
@@ -165,18 +166,18 @@ class TestKnownValues:
         prices = _arithmetic_prices(60, start=100.0)
         feat = compute_features(_make_ohlcv(prices))
 
-        # macd_line NaN for rows 0-24, valid from row 25
-        assert feat["macd_line"].iloc[:25].isna().all(), "macd_line rows 0-24 must be NaN"
-        assert feat["macd_line"].iloc[25:].notna().all(), "macd_line from row 25 must be valid"
+        # macd_line NaN for rows 0-25, valid from row 26
+        assert feat["macd_line"].iloc[:26].isna().all(), "macd_line rows 0-25 must be NaN"
+        assert feat["macd_line"].iloc[26:].notna().all(), "macd_line from row 26 must be valid"
 
         # All valid macd_line values should be positive (EMA-12 > EMA-26 in uptrend)
-        valid_macd = feat["macd_line"].iloc[25:]
+        valid_macd = feat["macd_line"].iloc[26:]
         assert (valid_macd > 0).all(), f"macd_line must be >0 in uptrend, got negatives"
 
         # macd_signal: NaN until row 33 (0-indexed), valid from row 34 onward
-        # (ema_26 valid at row 25; need 9 more macd_line values → valid at row 25+8=33)
-        assert feat["macd_signal"].iloc[:33].isna().all(), "macd_signal rows 0-32 must be NaN"
-        assert feat["macd_signal"].iloc[33:].notna().all()
+        # (ema_26 valid at row 26; need 9 more macd_line values → valid at row 26+8=34)
+        assert feat["macd_signal"].iloc[:34].isna().all(), "macd_signal rows 0-33 must be NaN"
+        assert feat["macd_signal"].iloc[34:].notna().all()
 
     def test_price_to_ma200_nan_until_200_rows(self):
         """
@@ -184,11 +185,11 @@ class TestKnownValues:
         """
         prices = _arithmetic_prices(210, start=100.0)
         feat = compute_features(_make_ohlcv(prices))
-        assert feat["price_to_ma200"].iloc[:199].isna().all(), (
-            "price_to_ma200 rows 0-198 must be NaN (insufficient ma_200 history)"
+        assert feat["price_to_ma200"].iloc[:200].isna().all(), (
+            "price_to_ma200 rows 0-199 must be NaN (insufficient ma_200 history)"
         )
-        assert feat["price_to_ma200"].iloc[199:].notna().all(), (
-            "price_to_ma200 from row 199 must be valid (200-day MA available)"
+        assert feat["price_to_ma200"].iloc[200:].notna().all(), (
+            "price_to_ma200 from row 200 must be valid (200-day MA available)"
         )
 
     def test_ma5_above_ma20_nan_when_either_nan(self, arith_df):
@@ -199,10 +200,10 @@ class TestKnownValues:
         In a rising series, ma_5 > ma_20 → value = 1.0.
         """
         feat = compute_features(arith_df)
-        assert feat["ma5_above_ma20"].iloc[:19].isna().all(), (
-            "ma5_above_ma20 rows 0-18 must be NaN (ma_20 not yet valid)"
+        assert feat["ma5_above_ma20"].iloc[:20].isna().all(), (
+            "ma5_above_ma20 rows 0-19 must be NaN (ma_20 not yet valid)"
         )
-        valid = feat["ma5_above_ma20"].iloc[19:]
+        valid = feat["ma5_above_ma20"].iloc[20:]
         assert valid.notna().all()
         # Arithmetic series: ma_5 (trailing 5) > ma_20 (trailing 20) since prices are rising
         assert (valid == 1.0).all(), f"ma5_above_ma20 should be 1.0 in uptrend, got: {valid.tolist()}"
@@ -508,6 +509,33 @@ class TestLeakage:
             f"max diff = {max_prob_diff:.2e}. Scale invariance violated!"
         )
 
+    def test_7_volume_temporal_alignment_no_current_day_leakage(self):
+        """
+        LEAKAGE TEST 7 — Volume Temporal Alignment (Zero Current-Day Volume Leakage).
+
+        Features at date D must use volume up through D-1, matching the 1-day lag
+        applied to price features. Modifying the current day's (last row's) volume
+        must NOT change any feature on the current day.
+        """
+        N = 35
+        prices = _arithmetic_prices(N, start=100.0)
+        df_base = _make_ohlcv(prices, volume=1_000_000.0)
+        feat_base = compute_features(df_base)
+
+        # Mutate ONLY the final row's volume (an extreme spike on today's uncompleted bar)
+        df_mutated = df_base.copy()
+        df_mutated.loc[N - 1, "volume"] = 999_999_999.0
+        feat_mutated = compute_features(df_mutated)
+
+        # The final row's volume features (vol_spike, vol_ratio_5_20) must be identical
+        # because they only observe volume up through day N-2 (yesterday's bar).
+        assert feat_base["vol_spike"].iloc[N - 1] == feat_mutated["vol_spike"].iloc[N - 1], (
+            "LEAKAGE DETECTED: Changing today's volume altered today's vol_spike feature!"
+        )
+        assert feat_base["vol_ratio_5_20"].iloc[N - 1] == feat_mutated["vol_ratio_5_20"].iloc[N - 1], (
+            "LEAKAGE DETECTED: Changing today's volume altered today's vol_ratio_5_20 feature!"
+        )
+
 
 # ── NaN handling tests ────────────────────────────────────────────────────────
 
@@ -518,8 +546,8 @@ class TestNaNHandling:
         """price_to_ma200 must be NaN for the first 199 rows (0-indexed), valid from row 199."""
         prices = _arithmetic_prices(210, start=100.0)
         feat = compute_features(_make_ohlcv(prices))
-        assert feat["price_to_ma200"].iloc[:199].isna().all(), "price_to_ma200 rows 0-198 must be NaN"
-        assert feat["price_to_ma200"].iloc[199:].notna().all(), "price_to_ma200 rows 199+ must be valid"
+        assert feat["price_to_ma200"].iloc[:200].isna().all(), "price_to_ma200 rows 0-199 must be NaN"
+        assert feat["price_to_ma200"].iloc[200:].notna().all(), "price_to_ma200 rows 200+ must be valid"
 
     def test_no_expanding_window_approximation(self):
         """
@@ -557,8 +585,8 @@ class TestNaNHandling:
         assert len(clean) > 0, "clean DataFrame must not be empty for 220-row input."
         # The most restrictive feature is price_to_ma200 — first valid at row 199.
         # With 220 rows, we expect 220 - 199 = 21 valid rows.
-        assert len(clean) == 21, (
-            f"Expected 21 fully-valid rows (220-199), got {len(clean)}"
+        assert len(clean) == 20, (
+            f"Expected 20 fully-valid rows (220-200), got {len(clean)}"
         )
 
     def test_has_all_features_true_for_valid_row(self):

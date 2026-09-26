@@ -5,8 +5,11 @@ from src.backtest.backtest import (
     BacktestResult,
     BacktestTrade,
     DailySnapshot,
+    WalkForwardResult,
+    WalkForwardWindow,
     run_known_answer_test,
     run_strategy_backtest,
+    run_walk_forward_backtest,
 )
 
 __all__ = [
@@ -14,6 +17,9 @@ __all__ = [
     "BacktestResult",
     "BacktestTrade",
     "DailySnapshot",
+    "WalkForwardResult",
+    "WalkForwardWindow",
     "run_known_answer_test",
     "run_strategy_backtest",
+    "run_walk_forward_backtest",
 ]

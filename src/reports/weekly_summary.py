@@ -46,7 +46,7 @@ def _get_week_date_range(target_date: Optional[date] = None) -> Tuple[date, date
     return monday, friday
 
 
-def generate_weekly_summary_data(target_date: Optional[date] = None) -> Optional[Dict[str, Any]]:
+def generate_weekly_summary_data(target_date: Optional[date] = None, market: str = "US") -> Optional[Dict[str, Any]]:
     """
     Gathers data from DB for the weekly summary digest.
     Returns a dict with formatted values, or None if no portfolio data exists for the week.
@@ -56,11 +56,11 @@ def generate_weekly_summary_data(target_date: Optional[date] = None) -> Optional
     fri_str = friday_date.strftime("%Y-%m-%d")
 
     # Fetch snapshots
-    all_snapshots = repository.get_portfolio_snapshots(limit=500) if hasattr(repository, "get_portfolio_snapshots") else []
+    all_snapshots = repository.get_portfolio_snapshots(limit=500, market=market) if hasattr(repository, "get_portfolio_snapshots") else []
     
     if not all_snapshots:
         # Fallback check if single snapshot exists
-        latest_snap = repository.get_latest_portfolio_snapshot()
+        latest_snap = repository.get_latest_portfolio_snapshot(market=market)
         if latest_snap:
             all_snapshots = [latest_snap]
 
@@ -87,9 +87,10 @@ def generate_weekly_summary_data(target_date: Optional[date] = None) -> Optional
     weekly_gain_dollar = ending_value - starting_value
     weekly_gain_pct = (weekly_gain_dollar / starting_value * 100.0) if starting_value > 0 else 0.0
 
-    # Benchmark (SPY) comparison
+    # Benchmark comparison
+    bm_symbol = settings.get_benchmark(market)
     try:
-        spy_df = repository.get_market_data("SPY", start_date=mon_str, end_date=fri_str)
+        spy_df = repository.get_market_data(bm_symbol, start_date=mon_str, end_date=fri_str)
     except Exception:
         spy_df = pd.DataFrame()
 
@@ -109,7 +110,7 @@ def generate_weekly_summary_data(target_date: Optional[date] = None) -> Optional
     # Trades this week
     try:
         from dashboard.data_loader import get_recent_trades_df
-        trades_df = get_recent_trades_df(limit=200)
+        trades_df = get_recent_trades_df(limit=200, market=market)
     except Exception:
         trades_df = pd.DataFrame()
 
@@ -254,6 +255,7 @@ def generate_weekly_summary_data(target_date: Optional[date] = None) -> Optional
     week_label = f"{m_fmt} — {f_fmt}"
 
     return {
+        "benchmark": bm_symbol,
         "monday_date": mon_str,
         "friday_date": fri_str,
         "week_label": week_label,
@@ -282,6 +284,7 @@ def generate_weekly_summary_data(target_date: Optional[date] = None) -> Optional
 def format_weekly_summary_message(data: Dict[str, Any]) -> str:
     """Formats data dict into the exact beginner-friendly Telegram weekly summary message."""
     gain_sign = "+" if data["weekly_gain_dollar"] >= 0 else ""
+    bm_symbol = data.get("benchmark", "SPY")
     return (
         f"📊 WEEKLY SUMMARY\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -290,7 +293,7 @@ def format_weekly_summary_message(data: Dict[str, Any]) -> str:
         f"Starting Value:  ${data['starting_value']:,.2f}\n"
         f"Ending Value:    ${data['ending_value']:,.2f}\n"
         f"Weekly Gain:     {gain_sign}${data['weekly_gain_dollar']:,.2f} ({data['weekly_gain_pct']:+.2f}%)\n"
-        f"vs Market (SPY): {data['spy_comp_str']}\n\n"
+        f"vs Market ({bm_symbol}): {data['spy_comp_str']}\n\n"
         f"📈 THIS WEEK'S TRADES\n"
         f"Total Trades:    {data['total_trades']}\n"
         f"Wins:            {data['wins']} ✅\n"
@@ -314,7 +317,7 @@ def format_weekly_summary_message(data: Dict[str, Any]) -> str:
     )
 
 
-def send_weekly_summary(target_date: Optional[date] = None) -> bool:
+def send_weekly_summary(target_date: Optional[date] = None, market: str = "US") -> bool:
     """
     Generates and delivers weekly summary digest via Telegram only.
     Skipped gracefully if Telegram credentials are not set or if no data exists.
@@ -324,7 +327,7 @@ def send_weekly_summary(target_date: Optional[date] = None) -> bool:
         return False
 
     try:
-        data = generate_weekly_summary_data(target_date)
+        data = generate_weekly_summary_data(target_date, market=market)
         if not data:
             logger.warning("No weekly summary data available for target date %s. Skipping.", target_date)
             return False

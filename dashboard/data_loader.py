@@ -57,7 +57,7 @@ def get_last_pipeline_status() -> Dict[str, Any]:
     return {"status": "NO_RUNS", "message": "No pipeline runs recorded", "timestamp": None}
 
 
-def get_portfolio_summary() -> Dict[str, Any]:
+def get_portfolio_summary(market: str = "US") -> Dict[str, Any]:
     """
     Returns current portfolio snapshot and derived risk metrics.
 
@@ -65,7 +65,7 @@ def get_portfolio_summary() -> Dict[str, Any]:
     initializes with settings.initial_capital and zero open positions.
     """
     try:
-        snap = repository.get_latest_portfolio_snapshot()
+        snap = repository.get_latest_portfolio_snapshot(market=market)
     except Exception as exc:
         logger.warning("DB connection unavailable in get_portfolio_summary: %s", exc)
         snap = None
@@ -76,13 +76,13 @@ def get_portfolio_summary() -> Dict[str, Any]:
         last_status = {"status": "System Running on Cloud ✅", "message": "Trading pipeline running on GitHub. Check Telegram for live updates! 📱", "timestamp": None}
 
     if snap is None:
-        cash = float(settings.initial_capital)
-        total_equity = float(settings.initial_capital)
+        cash = float(settings.get_initial_capital(market))
+        total_equity = float(settings.get_initial_capital(market))
         raw_positions: Dict[str, Any] = {}
         run_date = None
     else:
-        cash = float(snap.get("cash", settings.initial_capital))
-        total_equity = float(snap.get("total_value", settings.initial_capital))
+        cash = float(snap.get("cash", settings.get_initial_capital(market)))
+        total_equity = float(snap.get("total_value", settings.get_initial_capital(market)))
         raw_positions = snap.get("positions", {}) or {}
         run_date = snap.get("run_date")
 
@@ -159,12 +159,12 @@ def get_portfolio_summary() -> Dict[str, Any]:
     }
 
 
-def get_equity_history_df() -> pd.DataFrame:
+def get_equity_history_df(market: str = "US") -> pd.DataFrame:
     """
     Returns historical daily portfolio snapshots formatted as a time-series DataFrame.
     """
     try:
-        snapshots = repository.get_portfolio_snapshots(limit=500)
+        snapshots = repository.get_portfolio_snapshots(limit=500, market=market)
     except Exception as exc:
         logger.warning("DB connection error in get_equity_history_df: %s", exc)
         snapshots = []
@@ -174,8 +174,8 @@ def get_equity_history_df() -> pd.DataFrame:
         today_str = date.today().strftime("%Y-%m-%d")
         return pd.DataFrame([{
             "date": today_str,
-            "cash": float(settings.initial_capital),
-            "total_value": float(settings.initial_capital),
+            "cash": float(settings.get_initial_capital(market)),
+            "total_value": float(settings.get_initial_capital(market)),
             "invested": 0.0,
         }])
 
@@ -196,12 +196,12 @@ def get_equity_history_df() -> pd.DataFrame:
     return df
 
 
-def get_recent_trades_df(limit: int = 50) -> pd.DataFrame:
+def get_recent_trades_df(limit: int = 50, market: str = "US") -> pd.DataFrame:
     """
     Returns recent executed trades from DB.
     """
     try:
-        trades = repository.get_trades(run_date=None, limit=limit)
+        trades = repository.get_trades(run_date=None, limit=limit, market=market)
     except Exception as exc:
         logger.warning("DB connection error in get_recent_trades_df: %s", exc)
         trades = []
@@ -221,15 +221,21 @@ def get_recent_trades_df(limit: int = 50) -> pd.DataFrame:
             "net_pnl": round(float(t.get("net_pnl", 0.0)), 4),
         })
 
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+    import datetime
+    cutoff = (datetime.datetime.now() - datetime.timedelta(days=90)).strftime("%Y-%m-%d")
+    if not df.empty and "date" in df.columns:
+        df = df[df["date"] >= cutoff]
+
+    return df
 
 
-def get_recent_orders_df(limit: int = 50) -> pd.DataFrame:
+def get_recent_orders_df(limit: int = 50, market: str = "US") -> pd.DataFrame:
     """
     Returns recent order decisions from DB.
     """
     try:
-        orders = repository.get_orders(run_date=None, limit=limit)
+        orders = repository.get_orders(run_date=None, limit=limit, market=market)
     except Exception as exc:
         logger.warning("DB connection error in get_recent_orders_df: %s", exc)
         orders = []
@@ -248,7 +254,13 @@ def get_recent_orders_df(limit: int = 50) -> pd.DataFrame:
             "reason": o.get("reason", ""),
         })
 
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+    import datetime
+    cutoff = (datetime.datetime.now() - datetime.timedelta(days=90)).strftime("%Y-%m-%d")
+    if not df.empty and "date" in df.columns:
+        df = df[df["date"] >= cutoff]
+
+    return df
 
 
 get_orders_df = get_recent_orders_df
@@ -280,7 +292,7 @@ def get_system_events_df(limit: int = 100) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def get_market_regime_and_predictions() -> Tuple[Dict[str, Any], pd.DataFrame]:
+def get_market_regime_and_predictions(market: str = "US") -> Tuple[Dict[str, Any], pd.DataFrame]:
     """
     Pulls regime status (SPY vs 200d MA) and generates/loads latest candidate rankings.
     """
@@ -296,8 +308,9 @@ def get_market_regime_and_predictions() -> Tuple[Dict[str, Any], pd.DataFrame]:
     try:
         from src.data.market_data import fetch_ticker_data
         from src.data.validation import validate_ticker_data
-        spy_raw = fetch_ticker_data("SPY", period="2y")
-        spy_val = validate_ticker_data(spy_raw, ticker="SPY")
+        bm_symbol = settings.get_benchmark(market)
+        spy_raw = fetch_ticker_data(bm_symbol, period="2y")
+        spy_val = validate_ticker_data(spy_raw, ticker=bm_symbol)
         if spy_val.is_valid and len(spy_val.cleaned_df) >= settings.regime_ma_window:
             spy_df = spy_val.cleaned_df.sort_values("date").reset_index(drop=True)
             curr_price = float(spy_df["close"].iloc[-1])
@@ -345,7 +358,7 @@ def get_market_regime_and_predictions() -> Tuple[Dict[str, Any], pd.DataFrame]:
     except Exception as exc:
         regime_info["active_model"] = f"None ({exc})"
 
-    for ticker in settings.ticker_list:
+    for ticker in settings.get_universe(market):
         # Check DB prediction for today
         db_p = repository.get_predictions(ticker, today_str, today_str)
         prob = float(db_p["probability"].iloc[-1]) if not db_p.empty else 0.50
@@ -395,13 +408,13 @@ def get_market_regime_and_predictions() -> Tuple[Dict[str, Any], pd.DataFrame]:
     return regime_info, preds_df
 
 
-def run_daily_paper_cycle_trigger(run_date: Optional[str] = None) -> Dict[str, Any]:
+def run_daily_paper_cycle_trigger(run_date: Optional[str] = None, market: str = "US") -> Dict[str, Any]:
     """
     Executes a daily pipeline paper-trading cycle and returns the audit summary.
     """
     from src.pipeline.daily_pipeline import run_daily_pipeline
     target_date = run_date or date.today().strftime("%Y-%m-%d")
-    result = run_daily_pipeline(run_date=target_date)
+    result = run_daily_pipeline(run_date=target_date, market_name=market)
     return {
         "run_date": target_date,
         "fills_count": len(result.fills),
@@ -409,6 +422,31 @@ def run_daily_paper_cycle_trigger(run_date: Optional[str] = None) -> Dict[str, A
         "equity": result.total_equity,
         "audit_markdown": result.to_markdown(),
     }
+
+
+def _backtest_warmup_start(start_date: str) -> str:
+    """Fetch start giving 200-day features valid history on day 1; the test window is unchanged."""
+    return (pd.to_datetime(start_date) - pd.Timedelta(days=400)).strftime("%Y-%m-%d")
+
+
+def _validate_backtest_universe(
+    tickers: List[str], fetch_start: str, fetch_end: str,
+) -> Tuple[Dict[str, pd.DataFrame], Dict[str, List[Tuple[str, str]]]]:
+    """Point-in-time validation: a later bad row excludes a ticker only from the dates live would have."""
+    from src.data.market_data import fetch_ticker_data
+    from src.data.validation import validate_ticker_data_point_in_time
+
+    universe_dict: Dict[str, pd.DataFrame] = {}
+    data_exclusions: Dict[str, List[Tuple[str, str]]] = {}
+    for t in tickers:
+        val = validate_ticker_data_point_in_time(
+            fetch_ticker_data(t, start_date=fetch_start, end_date=fetch_end), ticker=t,
+        )
+        if val.is_valid:
+            universe_dict[t] = val.cleaned_df
+            if val.excluded_windows:
+                data_exclusions[t] = val.excluded_windows
+    return universe_dict, data_exclusions
 
 
 def run_backtest_trigger(
@@ -422,10 +460,8 @@ def run_backtest_trigger(
     from src.data.market_data import fetch_ticker_data
     from src.data.validation import validate_ticker_data
     from src.backtest.backtest import run_strategy_backtest
-    from src.ml.evaluate import load_active_model
 
     t_list = tickers or ["AAPL", "MSFT", "NVDA", "GOOGL", "META", "AMZN", "TSLA", "JPM"]
-    model = load_active_model()
 
     # Note on date inclusion: yfinance end_date is exclusive [start, end).
     # Extend fetch window slightly (+2 days) so the requested end_date is fetched.
@@ -433,16 +469,12 @@ def run_backtest_trigger(
         fetch_end = (pd.to_datetime(end_date) + pd.Timedelta(days=2)).strftime("%Y-%m-%d")
     except Exception:
         fetch_end = end_date
+    fetch_start = _backtest_warmup_start(start_date)
 
-    spy_raw = fetch_ticker_data("SPY", start_date=start_date, end_date=fetch_end)
+    spy_raw = fetch_ticker_data("SPY", start_date=fetch_start, end_date=fetch_end)
     spy_df = validate_ticker_data(spy_raw, ticker="SPY").cleaned_df
 
-    universe_dict = {}
-    for t in t_list:
-        raw = fetch_ticker_data(t, start_date=start_date, end_date=fetch_end)
-        val = validate_ticker_data(raw, ticker=t)
-        if val.is_valid:
-            universe_dict[t] = val.cleaned_df
+    universe_dict, data_exclusions = _validate_backtest_universe(t_list, fetch_start, fetch_end)
 
     result = run_strategy_backtest(
         universe_dict=universe_dict,
@@ -450,7 +482,9 @@ def run_backtest_trigger(
         start_date=start_date,
         end_date=end_date,
         initial_capital=float(settings.initial_capital),
-        model=model,
+        # None -> engine resolves a model trained strictly before start_date, or flags non-OOS.
+        model=None,
+        data_exclusions=data_exclusions,
     )
     m = result.metrics
     eq_rows = [
@@ -470,12 +504,19 @@ def run_backtest_trigger(
         "max_drawdown": round(m.max_drawdown_pct, 2),
         "benchmark_max_drawdown": round(m.spy_max_drawdown_pct, 2),
         "sharpe_ratio": round(m.sharpe_ratio, 2),
-        "benchmark_sharpe_ratio": 0.58,
+        "benchmark_sharpe_ratio": round(m.spy_sharpe_ratio, 2),
         "win_rate": round(m.win_rate_pct, 2),
         "profit_factor": round(m.profit_factor, 2),
         "total_trades": m.total_trades,
         "net_pnl": round(m.final_equity - m.starting_capital, 2),
         "equity_curve": eq_df,
+        "survivorship_biased": m.survivorship_biased,
+        "alarm_triggered": m.alarm_triggered,
+        "alarm_reasons": list(m.alarm_reasons),
+        "model_out_of_sample": m.model_out_of_sample,
+        "resolved_model_name": m.resolved_model_name,
+        "start_date": m.start_date,
+        "end_date": m.end_date,
     }
 
 
@@ -493,7 +534,7 @@ def run_backtest_lab_trigger(
     use_sector_rotation: bool = True,
     use_macro_regime: bool = True,
     use_correlation_filter: bool = True,
-    use_trailing_stop: bool = True,
+    use_trailing_stop: bool = settings.trailing_stop_enabled,
     tickers: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
@@ -502,25 +543,18 @@ def run_backtest_lab_trigger(
     from src.backtest.backtest import run_lab_backtest
     from src.data.market_data import fetch_ticker_data, save_raw_snapshot
     from src.data.validation import validate_ticker_data
-    from src.ml.evaluate import load_active_model
 
     t_list = tickers or ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "BRK-B", "JNJ", "JPM", "V"]
     try:
         fetch_end = (pd.to_datetime(end_date) + pd.Timedelta(days=2)).strftime("%Y-%m-%d")
     except Exception:
         fetch_end = end_date
+    fetch_start = _backtest_warmup_start(start_date)
 
-    spy_raw = fetch_ticker_data("SPY", start_date=start_date, end_date=fetch_end)
+    spy_raw = fetch_ticker_data("SPY", start_date=fetch_start, end_date=fetch_end)
     spy_df = validate_ticker_data(spy_raw, ticker="SPY").cleaned_df
 
-    universe_dict = {}
-    for t in t_list:
-        raw = fetch_ticker_data(t, start_date=start_date, end_date=fetch_end)
-        val = validate_ticker_data(raw, ticker=t)
-        if val.is_valid:
-            universe_dict[t] = val.cleaned_df
-
-    model = load_active_model()
+    universe_dict, data_exclusions = _validate_backtest_universe(t_list, fetch_start, fetch_end)
 
     return run_lab_backtest(
         universe_dict=universe_dict,
@@ -540,7 +574,8 @@ def run_backtest_lab_trigger(
         use_macro_regime=use_macro_regime,
         use_correlation_filter=use_correlation_filter,
         use_trailing_stop=use_trailing_stop,
-        model=model,
+        model=None,
+        data_exclusions=data_exclusions,
     )
 
 
@@ -626,12 +661,12 @@ def get_model_calibration_info() -> Dict[str, Any]:
 
 # ── V2.2 Wave 1: Portfolio Intelligence Loaders ───────────────────────────────
 
-def get_portfolio_sectors_summary() -> Dict[str, Any]:
+def get_portfolio_sectors_summary(market: str = "US") -> Dict[str, Any]:
     """
     Retrieves sector breakdown and concentration metrics for current portfolio.
     """
     from src.portfolio.intelligence import compute_sector_breakdown
-    summary = get_portfolio_summary()
+    summary = get_portfolio_summary(market=market)
     return compute_sector_breakdown(
         positions=summary.get("positions", []),
         cash=summary.get("cash", 10000.0),
@@ -639,12 +674,12 @@ def get_portfolio_sectors_summary() -> Dict[str, Any]:
     )
 
 
-def get_portfolio_diversification_summary() -> Dict[str, Any]:
+def get_portfolio_diversification_summary(market: str = "US") -> Dict[str, Any]:
     """
     Retrieves Diversification Score (0-100) and HHI concentration analysis.
     """
     from src.portfolio.intelligence import compute_diversification_score
-    summary = get_portfolio_summary()
+    summary = get_portfolio_summary(market=market)
     return compute_diversification_score(
         positions=summary.get("positions", []),
         cash=summary.get("cash", 10000.0),
@@ -657,12 +692,13 @@ def simulate_what_if_action(
     ticker: str,
     simulated_amount: Optional[float] = None,
     simulated_price: Optional[float] = None,
+    market: str = "US",
 ) -> Dict[str, Any]:
     """
     Runs in-memory structural what-if simulation on current portfolio.
     """
     from src.portfolio.intelligence import simulate_what_if
-    summary = get_portfolio_summary()
+    summary = get_portfolio_summary(market=market)
     return simulate_what_if(
         positions=summary.get("positions", []),
         cash=summary.get("cash", 10000.0),
@@ -721,7 +757,7 @@ def get_macro_environment_summary() -> Dict[str, Any]:
 
 # ── Section 6 Item 1: Performance Charts Loaders ─────────────────────────────
 
-def get_portfolio_vs_spy_chart_data() -> pd.DataFrame:
+def get_portfolio_vs_spy_chart_data(market: str = "US") -> pd.DataFrame:
     """
     Returns time-series DataFrame comparing Portfolio value to SPY benchmark.
     Data comes strictly from portfolio_snapshots and market_data tables in the database.
@@ -733,7 +769,7 @@ def get_portfolio_vs_spy_chart_data() -> pd.DataFrame:
       underperforming: bool (My Portfolio < SPY Benchmark)
       deficit: float ($)
     """
-    snapshots = repository.get_portfolio_snapshots(limit=1000)
+    snapshots = repository.get_portfolio_snapshots(limit=1000, market=market)
     cols = ["date", "My Portfolio", "SPY Benchmark", "underperforming", "deficit"]
     if not snapshots:
         today_str = date.today().strftime("%Y-%m-%d")
@@ -756,7 +792,7 @@ def get_portfolio_vs_spy_chart_data() -> pd.DataFrame:
     )
 
     # Query SPY market data from database
-    spy_df = repository.get_market_data("SPY")
+    spy_df = repository.get_market_data(settings.get_benchmark(market))
     spy_map: Dict[str, float] = {}
     spy_base_price: Optional[float] = None
 
@@ -809,14 +845,14 @@ def get_portfolio_vs_spy_chart_data() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def get_daily_returns_histogram_data(num_bins: int = 15) -> pd.DataFrame:
+def get_daily_returns_histogram_data(num_bins: int = 15, market: str = "US") -> pd.DataFrame:
     """
     Returns binned frequency of daily portfolio % returns.
     Green bars represent positive return days (>= 0%).
     Red bars represent negative return days (< 0%).
     Includes bin_center, bin_label, count, and sign.
     """
-    snapshots = repository.get_portfolio_snapshots(limit=1000)
+    snapshots = repository.get_portfolio_snapshots(limit=1000, market=market)
     cols = ["bin_center", "bin_label", "count", "sign"]
     if not snapshots or len(snapshots) < 2:
         return pd.DataFrame(columns=cols)
@@ -871,7 +907,7 @@ def get_daily_returns_histogram_data(num_bins: int = 15) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def get_win_loss_trades_chart_data(limit: int = 200) -> pd.DataFrame:
+def get_win_loss_trades_chart_data(limit: int = 200, market: str = "US") -> pd.DataFrame:
     """
     Returns closed trade PnL history for win/loss bar chart.
     Each bar represents one closed trade (action == 'SELL' or net_pnl != 0.0).
@@ -913,7 +949,7 @@ def get_win_loss_trades_chart_data(limit: int = 200) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def get_sector_allocation_donut_data() -> pd.DataFrame:
+def get_sector_allocation_donut_data(market: str = "US") -> pd.DataFrame:
     """
     Returns current portfolio split by economic sector, with Cash as its own slice.
     Data comes from the latest portfolio_snapshots and screener universe sector metadata.
@@ -924,7 +960,7 @@ def get_sector_allocation_donut_data() -> pd.DataFrame:
     """
     from src.portfolio.intelligence import get_ticker_sector
 
-    snap = repository.get_latest_portfolio_snapshot()
+    snap = repository.get_latest_portfolio_snapshot(market=market)
     if snap is None:
         c0 = float(settings.initial_capital)
         return pd.DataFrame([{
@@ -983,15 +1019,15 @@ def _normalize_exit_reason(reason: Optional[str], pnl: float) -> str:
     return "Signal"
 
 
-def get_closed_trade_history() -> Tuple[pd.DataFrame, Dict[str, Any], pd.DataFrame]:
+def get_closed_trade_history(market: str = "US") -> Tuple[pd.DataFrame, Dict[str, Any], pd.DataFrame]:
     """
     Constructs closed trade history by pairing BUY and SELL records chronologically (FIFO).
 
     Returns:
         (closed_df, summary_metrics, export_df)
     """
-    trades = repository.get_trades(limit=10000)
-    orders = repository.get_orders(limit=10000)
+    trades = repository.get_trades(limit=10000, market=market)
+    orders = repository.get_orders(limit=10000, market=market)
 
     # Map (date, ticker, 'SELL') to order reason
     order_reason_map: Dict[Tuple[str, str, str], str] = {}
@@ -1120,6 +1156,12 @@ def get_closed_trade_history() -> Tuple[pd.DataFrame, Dict[str, Any], pd.DataFra
     closed_records.sort(key=lambda r: (r["Date Sold"], r["Date Bought"]), reverse=True)
     closed_df = pd.DataFrame(closed_records)
 
+    if "Profit / Loss ($)" in closed_df.columns and "Entry Price" in closed_df.columns:
+        closed_df["Risk/Reward"] = closed_df.apply(
+            lambda r: round(r["Profit / Loss ($)"] / (r["Entry Price"] * 0.08), 2)
+            if r["Entry Price"] > 0 else 0.0, axis=1
+        )
+
     # Compute Summary metrics
     total_trades = len(closed_records)
     total_pnl = round(sum(r["Profit / Loss ($)"] for r in closed_records), 2)
@@ -1169,12 +1211,12 @@ from dashboard.live_ticker import (
 )
 
 
-def get_held_positions_correlation_data() -> pd.DataFrame:
+def get_held_positions_correlation_data(market: str = "US") -> pd.DataFrame:
     """
     Computes/fetches pairwise correlation matrix for currently held portfolio stocks.
     Returns a square DataFrame of correlations (index=tickers, columns=tickers).
     """
-    snap = repository.get_latest_portfolio_snapshot()
+    snap = repository.get_latest_portfolio_snapshot(market=market)
     if not snap or "positions" not in snap or not snap["positions"]:
         return pd.DataFrame()
 
@@ -1291,17 +1333,17 @@ def run_tax_report_trigger(year: int = 2026, country: str = "India") -> Dict[str
 
 # ── Section 10 Option C: Chatbot Data Loader ─────────────────────────────
 
-def ask_chatbot_trigger(user_message: str, chat_history: Optional[List[Dict[str, str]]] = None) -> str:
+def ask_chatbot_trigger(user_message: str, chat_history: Optional[List[Dict[str, str]]] = None, market: str = "US") -> str:
     """
-    Triggers the Gemini Chatbot response for a user prompt.
+    Triggers the Gemini Chatbot response for a user prompt in active market context.
     """
     from src.chatbot.gemini_chat import ask_gemini_chatbot
-    return ask_gemini_chatbot(user_message=user_message, chat_history=chat_history)
+    return ask_gemini_chatbot(user_message=user_message, chat_history=chat_history, market=market)
 
 
 # ── Performance Metrics & Walk Forward History Data Loaders ───────────────────
 
-def get_performance_metrics_data() -> Dict[str, Any]:
+def get_performance_metrics_data(market: str = "US") -> Dict[str, Any]:
     """
     Computes performance metrics: Sharpe Ratio, Max Drawdown, Calmar Ratio,
     Sortino Ratio, Win Rate %, Profit Factor from snapshots and trades tables.
@@ -1318,7 +1360,7 @@ def get_performance_metrics_data() -> Dict[str, Any]:
     import numpy as np
 
     try:
-        equity_df = get_equity_history_df()
+        equity_df = get_equity_history_df(market=market)
         if not equity_df.empty and len(equity_df) >= 2:
             equity_df = equity_df.sort_values("date").reset_index(drop=True)
             values = equity_df["total_value"].astype(float)
@@ -1377,7 +1419,7 @@ def get_performance_metrics_data() -> Dict[str, Any]:
 
     # Trades metrics: Win Rate % and Profit Factor
     try:
-        closed_df, summary_metrics, _ = get_closed_trade_history()
+        closed_df, summary_metrics, _ = get_closed_trade_history(market=market)
         metrics["win_rate_pct"] = round(float(summary_metrics.get("win_rate", 0.0)), 1)
 
         if not closed_df.empty and "Profit / Loss ($)" in closed_df.columns:
@@ -1411,7 +1453,52 @@ def get_walk_forward_history_data(model_type: Optional[str] = None) -> pd.DataFr
         ])
 
 
+def get_drawdown_series(market: str = "US") -> pd.DataFrame:
+    try:
+        equity_df = get_equity_history_df(market=market)
+        if equity_df.empty or len(equity_df) < 2:
+            return pd.DataFrame()
+        equity_df = equity_df.sort_values("date").reset_index(drop=True)
+        values = equity_df["total_value"].astype(float)
+        cummax = values.cummax()
+        drawdown = ((values - cummax) / cummax) * 100
+        return pd.DataFrame({"date": equity_df["date"], "drawdown_pct": drawdown})
+    except Exception:
+        return pd.DataFrame()
 
 
+def get_ohlcv_data(ticker: str, days: int = 30) -> pd.DataFrame:
+    """
+    Returns OHLCV data for a specific ticker from the database.
 
+    Parameters
+    ----------
+    ticker : str
+        Ticker symbol (e.g., "AAPL")
+    days : int
+        Number of trading days to retrieve (default: 30)
 
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with columns: date, open, high, low, close, volume.
+        Returns empty DataFrame if no data found.
+    """
+    try:
+        df = repository.get_market_data(ticker)
+        if df.empty:
+            return pd.DataFrame()
+
+        df = df.copy()
+        if "date" in df.columns:
+            df["date"] = pd.to_datetime(df["date"])
+
+        required_cols = ["date", "open", "high", "low", "close", "volume"]
+        if not all(c in df.columns for c in required_cols):
+            return pd.DataFrame()
+
+        df = df[required_cols].sort_values("date").tail(days).reset_index(drop=True)
+        return df
+    except Exception as exc:
+        logger.warning("get_ohlcv_data failed for %s: %s", ticker, exc)
+        return pd.DataFrame()

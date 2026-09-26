@@ -229,3 +229,43 @@ def test_universe_calendar_graceful_yfinance_failure():
             persist=False,
         )
     assert result.calendar["AAPL"].status == "UNKNOWN"
+
+
+def test_historical_replay_no_live_earnings_leakage():
+    """
+    Historical replay dates must NOT call live yfinance calendar APIs.
+    If no point-in-time earnings exist, must return neutral UNKNOWN without hitting live network.
+    If point-in-time DB cache exists, must consume only that historical record.
+    """
+    historical_date_str = "2023-05-15"
+    historical_dt = date(2023, 5, 15)
+
+    # 1. No cached record -> strictly returns UNKNOWN without calling live yf.Ticker
+    with patch("src.intelligence.earnings.repository.get_latest_earnings_calendar", return_value={}):
+        with patch("src.intelligence.earnings.yf.Ticker") as mock_ticker:
+            info = fetch_earnings_for_ticker("AAPL", as_of_date=historical_dt)
+            mock_ticker.assert_not_called()
+
+    assert info.status == "UNKNOWN"
+    assert info.size_multiplier == 1.0
+    assert info.is_blocked is False
+    assert info.hold_protection is False
+    assert info.earnings_date is None
+
+    # 2. Point-in-time cached record -> uses historical record without calling live API
+    cached_record = {
+        "AAPL": {
+            "earnings_date": "2023-05-17",
+            "days_until_earnings": 2,
+            "fetched_date": "2023-05-15",
+        }
+    }
+    with patch("src.intelligence.earnings.repository.get_latest_earnings_calendar", return_value=cached_record):
+        with patch("src.intelligence.earnings.yf.Ticker") as mock_ticker:
+            info_cached = fetch_earnings_for_ticker("AAPL", as_of_date=historical_dt)
+            mock_ticker.assert_not_called()
+
+    assert info_cached.status == "BLACKOUT"
+    assert info_cached.days_until_earnings == 2
+    assert info_cached.is_blocked is True
+    assert info_cached.earnings_date == "2023-05-17"

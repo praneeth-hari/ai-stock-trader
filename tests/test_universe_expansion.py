@@ -50,3 +50,22 @@ def test_each_sector_has_multiple_stocks():
 
     for sector, count in sector_counts.items():
         assert count >= 2, f"Sector {sector} has only {count} stocks, expected at least 2 for diversification"
+
+
+def test_india_tickers_count():
+    from config.settings import settings
+    assert len(settings.india_tickers) == 25
+
+
+def test_india_tickers_have_ns_suffix():
+    from config.settings import settings
+    assert all(t.endswith(".NS") for t in settings.india_tickers)
+
+
+def test_india_settings_exist():
+    from config.settings import settings
+    assert settings.india_initial_capital == 10000.0
+    assert settings.india_benchmark == "^NSEI"
+    assert settings.india_vix_symbol == "^INDIAVIX"
+    assert settings.india_currency == "INR"
+    assert settings.india_pipeline_hour_ist == 16

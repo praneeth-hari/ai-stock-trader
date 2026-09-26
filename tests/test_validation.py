@@ -177,6 +177,29 @@ class TestSpikeDetection:
         assert not result.is_valid
         assert any("spike" in e.lower() for e in result.errors), result.errors
 
+    def test_point_in_time_spike_only_excludes_dates_live_would_have(self):
+        """
+        A spike late in the history must not remove the ticker from earlier backtest dates.
+        Live validation (whole window) still rejects; the point-in-time variant excludes only
+        [spike, spike + live lookback].
+        """
+        from src.data.validation import live_validation_lookback_days, validate_ticker_data_point_in_time
+
+        dates = pd.bdate_range("2024-01-02", periods=60).strftime("%Y-%m-%d").tolist()
+        spike_date = dates[50]
+        rows = [_good_row(d, close=100.0) for d in dates[:50]]
+        rows += [{**_good_row(d, close=140.0), "volume": 5_000_000} for d in dates[50:]]  # +40% on day 50
+        df = _make_df(rows)
+
+        assert not validate_ticker_data(df, "LATE").is_valid  # live gate behaviour unchanged
+
+        pit = validate_ticker_data_point_in_time(df, "LATE")
+        lookback_end = (pd.Timestamp(spike_date) + pd.Timedelta(days=live_validation_lookback_days())).strftime("%Y-%m-%d")
+        assert pit.is_valid and len(pit.cleaned_df) == 60
+        assert pit.excluded_windows == [(spike_date, lookback_end)]
+        assert all(d < pit.excluded_windows[0][0] for d in dates[:50])  # earlier dates usable
+        assert any("spike" in e.lower() for e in pit.errors)
+
     def test_normal_volatile_day_passes(self):
         """A 15% move (large but real — e.g., earnings) must not trigger the spike check."""
         df = _make_df([

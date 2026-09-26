@@ -61,7 +61,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import pandas as pd
@@ -91,6 +91,15 @@ WATCH_SIGNAL_FRACTION = 0.40
 
 # Required OHLCV columns in normalized Phase 1 output.
 REQUIRED_COLUMNS = ["date", "open", "high", "low", "close", "volume", "ticker"]
+
+# Calendar days of history the live daily pipeline fetches before run_date (before the
+# fetcher's own warmup extension). Shared so backtests can replay live validation windows.
+LIVE_FETCH_LOOKBACK_DAYS = 420
+
+
+def live_validation_lookback_days() -> int:
+    """Calendar days of history live validation sees on any run date (pipeline window + fetch warmup)."""
+    return LIVE_FETCH_LOOKBACK_DAYS + int(settings.warmup_bars * 365 / 252) + 15
 
 
 # ── NYSE calendar helper ───────────────────────────────────────────────────────
@@ -138,6 +147,9 @@ class ValidationResult:
     cleaned_df: pd.DataFrame
     errors: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
+    # Point-in-time validation only: inclusive (start, end) dates on which live validation would
+    # have rejected this ticker. Outside these windows its data is usable.
+    excluded_windows: List[Tuple[str, str]] = field(default_factory=list)
 
 
 # ── Individual check functions ─────────────────────────────────────────────────
@@ -244,6 +256,38 @@ def check_price_spikes(df: pd.DataFrame, ticker: str) -> List[str]:
     if "close" not in df.columns or len(df) < 2:
         return errors
 
+    pct_change, dynamic_threshold, dynamic_spike_mask, suspicious_jumps, vol_ratio = _price_spike_masks(df)
+    if dynamic_spike_mask.any():
+        bad_dates = df.loc[dynamic_spike_mask, "date"].tolist()
+        bad_vals = pct_change[dynamic_spike_mask].round(4).tolist()
+        bad_thresh = dynamic_threshold[dynamic_spike_mask].round(4).tolist()
+        errors.append(
+            f"{ticker}: dynamic price spike(s) beyond 10x avg daily move detected on dates "
+            f"{bad_dates} (moves: {bad_vals}, dynamic thresholds: {bad_thresh}). "
+            "Suspected bad data. Ticker rejected."
+        )
+
+    # 2. Secondary check: >= 25% price jump without volume spike (normal volume)
+    if suspicious_jumps.any():
+        bad_dates = df.loc[suspicious_jumps, "date"].tolist()
+        bad_jumps = pct_change[suspicious_jumps].round(4).tolist()
+        bad_ratios = vol_ratio[suspicious_jumps].round(2).tolist()
+        errors.append(
+            f"{ticker}: suspicious price jump(s) >=25% with normal volume (no volume spike) detected on dates "
+            f"{bad_dates} (jumps: {bad_jumps}, volume ratios vs 20d avg: {bad_ratios}). "
+            "Suspected bad data. Ticker rejected."
+        )
+
+    return errors
+
+
+def _price_spike_masks(df: pd.DataFrame):
+    """
+    Row-level spike flags for check_price_spikes. Every threshold uses only rows before the
+    flagged row (shifted rolling windows), so each flag is decidable on its own date.
+
+    Returns (pct_change, dynamic_threshold, dynamic_spike_mask, suspicious_jump_mask, vol_ratio).
+    """
     pct_change = df["close"].pct_change().abs()
 
     # 1. Dynamic per-ticker volatility check
@@ -256,21 +300,13 @@ def check_price_spikes(df: pd.DataFrame, ticker: str) -> List[str]:
         dynamic_threshold = (base_avg_move * settings.dynamic_spike_std_multiplier).clip(lower=0.20, upper=0.50)
     else:
         dynamic_threshold = pd.Series(SPIKE_THRESHOLD, index=df.index)
-
     dynamic_spike_mask = pct_change > dynamic_threshold
-    if dynamic_spike_mask.any():
-        bad_dates = df.loc[dynamic_spike_mask, "date"].tolist()
-        bad_vals = pct_change[dynamic_spike_mask].round(4).tolist()
-        bad_thresh = dynamic_threshold[dynamic_spike_mask].round(4).tolist()
-        errors.append(
-            f"{ticker}: dynamic price spike(s) beyond 10x avg daily move detected on dates "
-            f"{bad_dates} (moves: {bad_vals}, dynamic thresholds: {bad_thresh}). "
-            "Suspected bad data. Ticker rejected."
-        )
 
-    # 2. Secondary check: >= 25% price jump without volume spike (normal volume)
+    # 2. >= 25% price jump without volume spike (normal volume)
+    suspicious_jumps = pd.Series(False, index=df.index)
+    vol_ratio = pd.Series(np.nan, index=df.index)
     jump_25_mask = pct_change >= settings.suspicious_price_jump_pct
-    if jump_25_mask.any() and "volume" in df.columns and len(df) >= 2:
+    if jump_25_mask.any() and "volume" in df.columns:
         prev_avg_vol = df["volume"].shift(1).rolling(20, min_periods=1).mean()
         # If no prior volume history, fallback to current volume
         prev_avg_vol = prev_avg_vol.fillna(df["volume"])
@@ -278,17 +314,8 @@ def check_price_spikes(df: pd.DataFrame, ticker: str) -> List[str]:
         # Normal volume: volume on jump day <= 1.5x of 20-day average volume
         no_vol_spike = (vol_ratio <= settings.suspicious_volume_spike_threshold) | df["volume"].isna()
         suspicious_jumps = jump_25_mask & no_vol_spike
-        if suspicious_jumps.any():
-            bad_dates = df.loc[suspicious_jumps, "date"].tolist()
-            bad_jumps = pct_change[suspicious_jumps].round(4).tolist()
-            bad_ratios = vol_ratio[suspicious_jumps].round(2).tolist()
-            errors.append(
-                f"{ticker}: suspicious price jump(s) >=25% with normal volume (no volume spike) detected on dates "
-                f"{bad_dates} (jumps: {bad_jumps}, volume ratios vs 20d avg: {bad_ratios}). "
-                "Suspected bad data. Ticker rejected."
-            )
 
-    return errors
+    return pct_change, dynamic_threshold, dynamic_spike_mask, suspicious_jumps, vol_ratio
 
 
 def check_trading_gaps(
@@ -464,6 +491,80 @@ def validate_ticker_data(df: pd.DataFrame, ticker: str) -> ValidationResult:
         cleaned_df=df.copy(),
         errors=[],
         warnings=warnings,
+    )
+
+
+def _sanity_violation_mask(df: pd.DataFrame) -> pd.Series:
+    """Row-level form of check_sanity_bounds: True where a row holds an impossible value."""
+    cols = [c for c in REQUIRED_COLUMNS if c != "ticker"]
+    mask = df[cols].isna().any(axis=1)
+    mask |= (df[["open", "high", "low", "close"]] <= 0).any(axis=1)
+    mask |= df["volume"] < 0
+    mask |= df["high"] < df["low"]
+    mask |= (df["close"] < df["low"]) | (df["close"] > df["high"])
+    mask |= (df["open"] < df["low"]) | (df["open"] > df["high"])
+    return mask
+
+
+def validate_ticker_data_point_in_time(
+    df: pd.DataFrame,
+    ticker: str,
+    lookback_days: Optional[int] = None,
+) -> ValidationResult:
+    """
+    Backtest form of validate_ticker_data that never uses future information.
+
+    validate_ticker_data rejects a ticker's ENTIRE history if any row fails, so a spike in 2025
+    would remove the stock from a 2019 backtest. Live trading only ever validates the trailing
+    lookback window, so a failing row on date S makes live skip the ticker on run dates
+    [S, S + lookback_days] and nowhere else. This reproduces exactly that:
+
+      - Same checks and thresholds (spike thresholds use only earlier rows).
+      - Each flagged row S yields an excluded window [S, S + lookback_days] (merged if overlapping).
+      - The ticker stays usable (is_valid=True) with full data; callers must honour
+        excluded_windows (run_strategy_backtest(data_exclusions=...)).
+
+    Missing columns or an empty frame still reject the ticker outright.
+    """
+    clean_ticker = ticker.strip().upper()
+    if df.empty or check_required_columns(df, clean_ticker):
+        return validate_ticker_data(df, clean_ticker)
+
+    lookback = int(lookback_days) if lookback_days is not None else live_validation_lookback_days()
+    df = df.sort_values("date").reset_index(drop=True)
+
+    errors = check_sanity_bounds(df, clean_ticker) + check_price_spikes(df, clean_ticker)
+    flagged = _sanity_violation_mask(df)
+    if len(df) >= 2:
+        _, _, dynamic_mask, suspicious_mask, _ = _price_spike_masks(df)
+        flagged |= dynamic_mask | suspicious_mask
+
+    windows: List[Tuple[str, str]] = []
+    for flag_date in sorted(df.loc[flagged, "date"].astype(str)):
+        end = (pd.Timestamp(flag_date) + pd.Timedelta(days=lookback)).strftime("%Y-%m-%d")
+        if windows and flag_date <= windows[-1][1]:
+            windows[-1] = (windows[-1][0], max(windows[-1][1], end))
+        else:
+            windows.append((flag_date, end))
+
+    warnings = check_trading_gaps(df, clean_ticker)
+    for start, end in windows:
+        msg = (
+            f"{clean_ticker}: excluded from {start} to {end} only — live validation's {lookback}-day "
+            "window would contain a flagged row on those dates. Earlier dates are unaffected."
+        )
+        warnings.append(msg)
+        logger.warning("POINT-IN-TIME VALIDATION %s", msg)
+    for e in errors:
+        logger.warning("POINT-IN-TIME VALIDATION %s flagged row(s): %s", clean_ticker, e)
+
+    return ValidationResult(
+        ticker=clean_ticker,
+        is_valid=True,
+        cleaned_df=df.copy(),
+        errors=errors,
+        warnings=warnings,
+        excluded_windows=windows,
     )
 
 

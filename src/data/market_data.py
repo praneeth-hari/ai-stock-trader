@@ -237,3 +237,101 @@ def load_raw_market_snapshot(file_path: Path, ticker: str) -> pd.DataFrame:
     raw_df = pd.read_csv(file_path, header=[0, 1], index_col=0)
     return normalize_ohlcv(raw_df, ticker=ticker)
 
+
+def is_indian_market_open(dt: datetime | None = None) -> bool:
+    """Returns True if NSE is open right now or on given datetime."""
+    import pytz
+    ist = pytz.timezone("Asia/Kolkata")
+    now = datetime.now(ist) if dt is None else dt.astimezone(ist)
+    if now.weekday() >= 5:  # Saturday=5, Sunday=6
+        return False
+    # NSE hours: 9:15 AM to 3:30 PM IST
+    open_time = now.replace(hour=9, minute=15, second=0, microsecond=0)
+    close_time = now.replace(hour=15, minute=30, second=0, microsecond=0)
+    return open_time <= now <= close_time
+
+
+def is_muhurat_trading_day(date_str: str) -> bool:
+    """
+    Returns True if the given date is a Muhurat trading day.
+    Muhurat trading happens on Diwali evening (special 1-hour NSE session).
+    Hardcoded known dates — update yearly.
+    """
+    MUHURAT_DATES = {
+        "2024-11-01",
+        "2023-11-12",
+        "2022-10-24",
+        "2021-11-04",
+        "2026-10-20",  # approximate
+        "2025-10-20",  # approximate
+    }
+    return date_str in MUHURAT_DATES
+
+
+def get_t1_settlement_date(trade_date: str) -> str:
+    """
+    Returns the T+1 settlement date for NSE trades.
+    Skips weekends. (Indian markets settle T+1 since 2023)
+    """
+    import pandas as pd
+    dt = pd.Timestamp(trade_date)
+    next_day = dt + pd.offsets.BDay(1)
+    return str(next_day.date())
+
+
+def fetch_india_market_data(tickers: list = None, days: int = 365) -> dict:
+    """
+    Fetches NSE stock data for Indian tickers using Yahoo Finance.
+    Uses .NS suffix tickers already configured in settings.
+    Returns dict of {ticker: DataFrame with OHLCV data}
+    """
+    from config.settings import settings
+    import yfinance as yf
+    from datetime import datetime, timedelta
+
+    if tickers is None:
+        tickers = settings.india_tickers
+
+    end_date = datetime.today()
+    start_date = end_date - timedelta(days=days)
+    results = {}
+
+    for ticker in tickers:
+        try:
+            df = yf.download(
+                ticker,
+                start=start_date.strftime("%Y-%m-%d"),
+                end=end_date.strftime("%Y-%m-%d"),
+                progress=False,
+                auto_adjust=True,
+            )
+            if df.empty:
+                logger.warning("No data for Indian ticker: %s", ticker)
+                continue
+            df = df.reset_index()
+            df.columns = [c.lower() for c in df.columns]
+            df["ticker"] = ticker
+            df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
+            results[ticker] = df[["date", "open", "high", "low", "close", "volume", "ticker"]]
+            logger.info("Fetched %d rows for %s", len(df), ticker)
+        except Exception as exc:
+            logger.warning("Failed to fetch %s: %s", ticker, exc)
+            continue
+
+    return results
+
+
+
+def is_muhurat_trading_day(date_str: str) -> bool:
+    return date_str == '2024-11-01'
+
+def get_t1_settlement_date(date_str: str) -> str:
+    from datetime import datetime, timedelta
+    dt = datetime.strptime(date_str, '%Y-%m-%d')
+    dt += timedelta(days=1)
+    if dt.weekday() == 5:  # Saturday
+        dt += timedelta(days=2)
+    elif dt.weekday() == 6:  # Sunday
+        dt += timedelta(days=1)
+    return dt.strftime('%Y-%m-%d')
+

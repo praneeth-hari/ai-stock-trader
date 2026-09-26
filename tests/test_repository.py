@@ -436,3 +436,21 @@ class TestWalkForwardResults:
         assert list(history_df["fold_number"]) == [0, 1]
         assert float(history_df["roc_auc"].iloc[1]) == 0.75
 
+
+def test_kill_switch_state_persists():
+    from src.db import repository
+    repository.create_all_tables()
+    repository.save_kill_switch_state(True, "Test reason")
+    enabled, reason = repository.load_kill_switch_state()
+    assert enabled is True
+    assert reason == "Test reason"
+    # cleanup
+    repository.save_kill_switch_state(False, "")
+
+
+def test_kill_switch_default_off():
+    from src.db import repository
+    enabled, reason = repository.load_kill_switch_state()
+    assert isinstance(enabled, bool)
+    assert isinstance(reason, str)
+

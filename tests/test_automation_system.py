@@ -44,3 +44,30 @@ def test_daily_status_report_generation():
     assert status_log.exists()
     content = status_log.read_text(encoding="utf-8")
     assert "DAILY EVENING STATUS REPORT" in content
+
+
+def test_kill_switch_default_is_off():
+    from config.settings import settings
+    assert settings.kill_switch_enabled is False
+
+
+def test_kill_switch_can_be_enabled():
+    from config.settings import settings
+    settings.kill_switch_enabled = True
+    assert settings.kill_switch_enabled is True
+    settings.kill_switch_enabled = False  # reset
+
+
+def test_kill_switch_reason_default_empty():
+    from config.settings import settings
+    assert settings.kill_switch_reason == ""
+
+
+def test_kill_switch_persists_across_reload():
+    from src.db import repository
+    repository.create_all_tables()
+    repository.save_kill_switch_state(True, "Test persist")
+    enabled, reason = repository.load_kill_switch_state()
+    assert enabled is True
+    assert reason == "Test persist"
+    repository.save_kill_switch_state(False, "")
