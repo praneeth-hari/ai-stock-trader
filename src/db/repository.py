@@ -309,6 +309,22 @@ def create_all_tables() -> None:
             pass
 
 
+_schema_ready_urls: set = set()
+
+
+def ensure_schema() -> None:
+    """
+    Run create_all_tables() once per process for the current database, before a reader's first query.
+    Readers that never write (dashboard, weekly summary) otherwise break when an additive migration
+    (a new column or table) has not yet been applied by a pipeline run.
+    """
+    url = str(settings.db_url)
+    if url not in _schema_ready_urls:
+        create_all_tables()
+        if _db_available:
+            _schema_ready_urls.add(url)
+
+
 # ── Market data ────────────────────────────────────────────────────────────────
 
 def save_market_data(df: pd.DataFrame) -> int:

@@ -55,7 +55,8 @@ def generate_weekly_summary_data(target_date: Optional[date] = None, market: str
     mon_str = monday_date.strftime("%Y-%m-%d")
     fri_str = friday_date.strftime("%Y-%m-%d")
 
-    # Fetch snapshots
+    # Fetch snapshots (after applying any pending schema migration: this job only reads)
+    repository.ensure_schema()
     all_snapshots = repository.get_portfolio_snapshots(limit=500, market=market) if hasattr(repository, "get_portfolio_snapshots") else []
     
     if not all_snapshots:

@@ -1807,6 +1807,7 @@ with tab5:
     # ── Emergency Kill Switch UI ──────────────────────────────────────────────
     # Load kill switch state from DB on startup
     from src.db import repository
+    repository.ensure_schema()
     _db_ks_enabled, _db_ks_reason = repository.load_kill_switch_state()
     if _db_ks_enabled != settings.kill_switch_enabled:
         settings.kill_switch_enabled = _db_ks_enabled

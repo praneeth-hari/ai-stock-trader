@@ -358,6 +358,24 @@ def _run_daily_pipeline_internal(
         tickers = settings.get_universe(market_name)
     market_comp = f"daily_pipeline_{market_name.lower()}"
 
+    # create_all_tables() falls back to "stateless mode" when the database cannot be opened or
+    # migrated. Trading without the database would start from an empty portfolio, persist nothing and
+    # bypass the same-day guard, so a trading run stops here instead: FAILED, no fills, no orders.
+    if not repository._db_available:
+        err = ("CRITICAL: DATABASE_UNAVAILABLE: database could not be opened or migrated; refusing to "
+               "trade without it (no fills, no orders, no portfolio changes).")
+        logger.critical(err)
+        for alert in (send_pipeline_failure_alert, notify_pipeline_failure):
+            try:
+                alert(error_message=err, run_date=run_date)
+            except Exception:
+                pass
+        return DailyPipelineResult(
+            run_date=run_date, tickers_fetched=0, tickers_valid=0, tickers_skipped=len(tickers),
+            regime="DATABASE_UNAVAILABLE", orders_generated=0, fills=[], pending_orders=[],
+            cash=0.0, total_equity=0.0, errors=[err],
+        )
+
     # ── Market Calendar Check ─────────────────────────────────────────────────
     if not force:
         from src.pipeline.scheduler import is_market_day

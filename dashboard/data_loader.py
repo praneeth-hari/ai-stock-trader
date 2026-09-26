@@ -21,6 +21,19 @@ from src.db import repository
 logger = logging.getLogger(__name__)
 
 
+def _with_schema(fn):
+    """Apply pending schema migrations (once per process) before this reader touches the database."""
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        repository.ensure_schema()
+        return fn(*args, **kwargs)
+
+    return wrapper
+
+
+@_with_schema
 def get_last_pipeline_status() -> Dict[str, Any]:
     """
     Inspects the database event log to determine the true outcome of the most recent pipeline execution.
@@ -60,6 +73,7 @@ def get_last_pipeline_status() -> Dict[str, Any]:
     return {"status": "NO_RUNS", "message": "No pipeline runs recorded", "timestamp": None}
 
 
+@_with_schema
 def get_portfolio_summary(market: str = "US") -> Dict[str, Any]:
     """
     Returns current portfolio snapshot and derived risk metrics.
@@ -162,6 +176,7 @@ def get_portfolio_summary(market: str = "US") -> Dict[str, Any]:
     }
 
 
+@_with_schema
 def get_equity_history_df(market: str = "US") -> pd.DataFrame:
     """
     Returns historical daily portfolio snapshots formatted as a time-series DataFrame.
@@ -199,6 +214,7 @@ def get_equity_history_df(market: str = "US") -> pd.DataFrame:
     return df
 
 
+@_with_schema
 def get_recent_trades_df(limit: int = 50, market: str = "US") -> pd.DataFrame:
     """
     Returns recent executed trades from DB.
@@ -233,6 +249,7 @@ def get_recent_trades_df(limit: int = 50, market: str = "US") -> pd.DataFrame:
     return df
 
 
+@_with_schema
 def get_recent_orders_df(limit: int = 50, market: str = "US") -> pd.DataFrame:
     """
     Returns recent order decisions from DB.
@@ -270,6 +287,7 @@ get_orders_df = get_recent_orders_df
 get_trades_df = get_recent_trades_df
 
 
+@_with_schema
 def get_system_events_df(limit: int = 100) -> pd.DataFrame:
     """
     Returns system audit and pipeline events.
@@ -295,6 +313,7 @@ def get_system_events_df(limit: int = 100) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+@_with_schema
 def get_market_regime_and_predictions(market: str = "US") -> Tuple[Dict[str, Any], pd.DataFrame]:
     """
     Pulls regime status (SPY vs 200d MA) and generates/loads latest candidate rankings.
@@ -411,6 +430,7 @@ def get_market_regime_and_predictions(market: str = "US") -> Tuple[Dict[str, Any
     return regime_info, preds_df
 
 
+@_with_schema
 def run_daily_paper_cycle_trigger(run_date: Optional[str] = None, market: str = "US") -> Dict[str, Any]:
     """
     Executes a daily pipeline paper-trading cycle and returns the audit summary.
@@ -618,6 +638,7 @@ def run_fundamental_screen_trigger(full_universe: bool = False, force: bool = Fa
 
 # ── V2.1 Wave 1: Explainability & Drift Loaders ───────────────────────────────
 
+@_with_schema
 def get_prediction_explanation(ticker: str) -> Optional[Dict[str, Any]]:
     """
     Computes SHAP feature attributions for a ticker's latest feature vector.
@@ -715,6 +736,7 @@ def simulate_what_if_action(
 
 # ── Section 5: Intelligence Layer Dashboard Loaders ───────────────────────────
 
+@_with_schema
 def get_sector_rotation_summary() -> List[Dict[str, Any]]:
     """
     Returns the latest sector rotation rankings from the database.
@@ -730,6 +752,7 @@ def get_sector_rotation_summary() -> List[Dict[str, Any]]:
         return []
 
 
+@_with_schema
 def get_macro_environment_summary() -> Dict[str, Any]:
     """
     Returns the latest macroeconomic environment snapshot from the database.
@@ -760,6 +783,7 @@ def get_macro_environment_summary() -> Dict[str, Any]:
 
 # ── Section 6 Item 1: Performance Charts Loaders ─────────────────────────────
 
+@_with_schema
 def get_portfolio_vs_spy_chart_data(market: str = "US") -> pd.DataFrame:
     """
     Returns time-series DataFrame comparing Portfolio value to SPY benchmark.
@@ -848,6 +872,7 @@ def get_portfolio_vs_spy_chart_data(market: str = "US") -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+@_with_schema
 def get_daily_returns_histogram_data(num_bins: int = 15, market: str = "US") -> pd.DataFrame:
     """
     Returns binned frequency of daily portfolio % returns.
@@ -910,6 +935,7 @@ def get_daily_returns_histogram_data(num_bins: int = 15, market: str = "US") -> 
     return pd.DataFrame(rows)
 
 
+@_with_schema
 def get_win_loss_trades_chart_data(limit: int = 200, market: str = "US") -> pd.DataFrame:
     """
     Returns closed trade PnL history for win/loss bar chart.
@@ -952,6 +978,7 @@ def get_win_loss_trades_chart_data(limit: int = 200, market: str = "US") -> pd.D
     return pd.DataFrame(rows)
 
 
+@_with_schema
 def get_sector_allocation_donut_data(market: str = "US") -> pd.DataFrame:
     """
     Returns current portfolio split by economic sector, with Cash as its own slice.
@@ -1022,6 +1049,7 @@ def _normalize_exit_reason(reason: Optional[str], pnl: float) -> str:
     return "Signal"
 
 
+@_with_schema
 def get_closed_trade_history(market: str = "US") -> Tuple[pd.DataFrame, Dict[str, Any], pd.DataFrame]:
     """
     Constructs closed trade history by pairing BUY and SELL records chronologically (FIFO).
@@ -1214,6 +1242,7 @@ from dashboard.live_ticker import (
 )
 
 
+@_with_schema
 def get_held_positions_correlation_data(market: str = "US") -> pd.DataFrame:
     """
     Computes/fetches pairwise correlation matrix for currently held portfolio stocks.
@@ -1239,6 +1268,7 @@ def get_held_positions_correlation_data(market: str = "US") -> pd.DataFrame:
 
 # ── Feature Importance Loaders (Section 9 Item 2) ─────────────────────────────
 
+@_with_schema
 def get_feature_importance_data(model_type: str = "primary") -> list:
     """
     Load the latest feature importance scores from the DB for a given model_type.
@@ -1264,6 +1294,7 @@ def get_feature_importance_data(model_type: str = "primary") -> list:
     return []
 
 
+@_with_schema
 def get_feature_importance_history_data(model_type: str = "primary", top_n: int = 5, last_n: int = 5) -> list:
     """
     Load feature importance time-series for the top-N features over the last N retrains.
@@ -1296,6 +1327,7 @@ def get_leaderboard_summary_data() -> Tuple[List[Dict[str, Any]], Optional[Dict[
         return [], None
 
 
+@_with_schema
 def get_leaderboard_equity_curves() -> pd.DataFrame:
     """
     Load all strategy snapshots and format as a DataFrame for Altair multi-line plotting.
@@ -1441,6 +1473,7 @@ def get_performance_metrics_data(market: str = "US") -> Dict[str, Any]:
     return metrics
 
 
+@_with_schema
 def get_walk_forward_history_data(model_type: Optional[str] = None) -> pd.DataFrame:
     """
     Fetches walk-forward validation history from the database.
@@ -1470,6 +1503,7 @@ def get_drawdown_series(market: str = "US") -> pd.DataFrame:
         return pd.DataFrame()
 
 
+@_with_schema
 def get_ohlcv_data(ticker: str, days: int = 30) -> pd.DataFrame:
     """
     Returns OHLCV data for a specific ticker from the database.
