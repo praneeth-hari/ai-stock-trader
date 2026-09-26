@@ -21,7 +21,7 @@ Final benchmark for the configured strategy (2-year walk-forward, net of 0.2% pe
 
 ### Code
 
-- V1 commit: `ed810d8adbbca13e6b2484c4184064ac7a49c838` (648 tests passed; see section 6 for what it contains). The hash is recorded in a follow-up commit that changes only this report.
+- V1 commit: `ed810d8adbbca13e6b2484c4184064ac7a49c838` (648 tests passed; see section 7 for what it contains). The hash is recorded in a follow-up commit that changes only this report.
 - Every effective setting equals its code default (checked 2026-09-26), so `.env` only repeats `config/settings.py` and a clean checkout runs the same configuration. `.env` stays uncommitted because it holds secrets.
 
 ### Model
@@ -67,8 +67,8 @@ Note: CLAUDE.md lists the signal exit as a flat 0.45. The code uses the volatili
 ### Other risk controls
 
 - Correlation (60-day): warn at ≥ 0.70; block above 0.85 for the same sector and above 0.90 for different sectors.
-- Macro circuit breaker settings: 5-day SPY drop 7% → 5-day halt; 20-day drop 15% → 10-day halt.
-- PSI drift: monitor at 0.10 (half size), alert at 0.25.
+- Macro circuit breaker: 5-day SPY drop 7% → 5-day halt; 20-day drop 15% → 10-day halt. The risk engine computes it from SPY on every run, so it is active live and in the backtests.
+- PSI drift: **not active in V1.** The risk engine only applies PSI (half size at 0.10, pause buys and alert at 0.25) when a PSI value is passed in, and neither the live pipeline nor the backtest computes or passes one. PSI is used only as a promotion gate inside monthly retraining, and promotion is frozen.
 
 ## 3. Rules during forward trading
 
@@ -79,7 +79,7 @@ Note: CLAUDE.md lists the signal exit as a flat 0.45. The code uses the volatili
   - monthly retraining still runs and saves candidates, but reports them as "awaiting approval" instead of promoting them.
 - **Ending the freeze** is a deliberate human decision: set `MODEL_FREEZE_ENABLED=false` and log why.
 - **Allowed changes:** only bug fixes that don't change decisions. Log each one with its date.
-- **Never tested on history:** sentiment, earnings calendar, macro circuit breaker and PSI drift are live-only and were never backtested.
+- **Never tested on history:** sentiment and the earnings calendar are live-only and were never backtested. (The circuit breaker is in both; PSI is in neither, see section 2.)
 
 ## 4. What to measure (decided in advance)
 
@@ -95,16 +95,35 @@ Note: CLAUDE.md lists the signal exit as a flat 0.45. The code uses the volatili
 
 | Automated path | Trades? | Forward-paper period |
 | --- | --- | --- |
-| Task `AI-Stock-Trader-Daily` → `run_trader.bat` → scheduler → pipeline (Mon–Fri 2:00 AM IST) | Yes, local SQLite portfolio | **Enabled**: the only trading path |
+| Task `AI-Stock-Trader-Daily` → `run_trader.bat` → scheduler → pipeline (Mon–Fri 3:30 AM IST) | Yes, local SQLite portfolio | **Enabled**: the only trading path |
 | Task `AI-Stock-Trader-Monthly-Retrain` → `python -m src.ml.retrain --force` | No | Enabled; candidates are saved but never promoted (freeze plus approval gate) |
-| Tasks `DailyStatus`, `Morning-HealthCheck`, `Weekly-Summary` | No | Enabled (reporting only) |
+| Tasks `DailyStatus` (4:00 AM IST), `Morning-HealthCheck`, `Weekly-Summary` | No | Enabled (reporting only) |
 | GitHub `daily_trading.yml` (remote database, unfrozen model) | Yes | **Disabled**: no schedule, and the job is hard-off even when started manually |
 | GitHub `monthly_retrain.yml`, `weekly_summary.yml` (remote database) | No | Schedules paused; manual runs still possible |
 
 - **Same-day duplicates:** `run_daily_pipeline` skips a second run for the same market and date. The scheduler's `--force` only bypasses weekend/holiday/market-hours checks, not this guard. The dashboard's manual "run cycle" button also goes through the guard.
 - **GitHub workflow changes take effect only after they are pushed.** Until then, GitHub keeps running the old schedules from `origin/main`.
+- **Timing across US daylight saving:** 3:30 AM IST is 6:00 PM ET in summer (EDT) and 5:00 PM ET in winter (EST, from 2026-11-01), so it is always after the 4:30 PM ET close-plus-settlement cutoff. The trading date is unchanged: `run_date` is the IST date, and each run decides on the previous US close. As a second line of defense, a live US run refuses to trade if SPY's latest bar is today's New York session before the cutoff (`INCOMPLETE_BAR`).
 
-## 6. What the V1 commit contains
+## 6. Operational rules (V1-safe; none of these change a trading decision)
+
+- **One trading cycle at a time, machine-wide.** Every run (scheduled task, dashboard button, CLI) holds an operating-system file lock on `data/locks/pipeline_us.lock` for its whole cycle. A second run in any process is refused immediately with status `HALTED` (exit code 3) and places no orders. The OS releases the lock when its process exits, even on a crash or kill, so it can't go stale. The crash recovery below relies on this: without the lock, a second run would mistake a live run's fills for a crash.
+- **All-or-nothing days.** A run's fills, cash, positions and next-open pending orders commit together in one portfolio row. If a run stops before that row is written, the next run removes that run's order and trade rows (keeping a copy in a CRITICAL `RECOVERY` audit event) and executes the committed pending orders exactly once. An order is never filled in the run that created it.
+- **Run status and exit codes.**
+
+  | Status | Meaning | Exit code |
+  | --- | --- | --- |
+  | `SUCCESS` | Completed with all inputs | 0 |
+  | `SKIPPED` | Nothing to do (market closed, already run) | 0 |
+  | `DEGRADED` | Completed and committed, but on partial inputs (skipped tickers, intelligence fallback, crash recovery) | 2 |
+  | `FAILED` | Day not committed, or no decisions possible; also any crash | 1 |
+  | `HALTED` | Kill switch, or another run in progress | 3 |
+
+  `run_trader.bat` labels each code in the daily log, and the scheduler's audit event carries `Status=…`.
+- **Intelligence status.** Sentiment, earnings, sector and macro each record `SUCCESS`, `DEGRADED` or `FAILED` with the reason, in a WARNING event and in the run's completion event. The neutral fallback values used on failure are unchanged; only the recording is new.
+- **Model failure while holding positions (`HALT_ALL`).** If the frozen model can't be verified or inference fails, the run stops before touching the portfolio: no pending orders are filled, no exits are evaluated (stop-loss and take-profit included), no new orders are queued and no snapshot is written. Held positions and pending orders stay exactly as committed, and the CRITICAL alert lists them. They are managed again on the next run with a verified model; until then held positions have no stop-loss protection, so a model alert needs same-day attention.
+
+## 7. What the V1 commit contains
 
 - **Included:** all modified production code in `config/`, `src/` and `dashboard/`, and all modified tests. This is the exact code that the backtests and the full test suite ran on; the market-isolation code is interwoven and inactive for the US universe. Also included: `tests/conftest.py`, `tests/test_market_isolation_fixes.py`, `tests/test_model_freeze.py`, `.gitignore`, `.gitattributes` and this report.
 - **Excluded (left uncommitted):**

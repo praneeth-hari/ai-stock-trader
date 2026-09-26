@@ -3,7 +3,7 @@
 # =============================================================================
 # Configures automated tasks under the "AI-Stock-Trader" folder:
 #   1. AI-Stock-Trader-Daily:
-#      Runs run_trader.bat every Mon-Fri at 2:00 AM IST (after US market close).
+#      Runs run_trader.bat every Mon-Fri at 3:30 AM IST (after US market close in both EDT and EST).
 #   2. AI-Stock-Trader-Morning-HealthCheck:
 #      Runs run_health_check.bat every Mon-Fri at 9:00 AM IST (morning check).
 #   3. AI-Stock-Trader-Startup:
@@ -11,7 +11,7 @@
 #   4. AI-Stock-Trader-Dashboard:
 #      Runs start_dashboard.bat on startup (with 60-second delay).
 #   5. AI-Stock-Trader-DailyStatus:
-#      Runs run_daily_status.bat every Mon-Fri at 3:00 AM IST (nightly digest).
+#      Runs run_daily_status.bat every Mon-Fri at 4:00 AM IST (nightly digest, after the trading run).
 #   6. AI-Stock-Trader-Monthly-Retrain:
 #      Runs run_retrain.bat on the first Saturday of each month at 10:00 AM IST.
 #   7. AI-Stock-Trader-Weekly-Summary:
@@ -67,8 +67,8 @@ foreach ($file in $RequiredFiles) {
 $Tasks = @(
     @{
         Name        = 'AI-Stock-Trader\AI-Stock-Trader-Daily'
-        Description = 'Automated daily trading pipeline [Mon-Fri at 2:00 AM IST (after US market close)]'
-        Schedule    = 'weekly /d MON,TUE,WED,THU,FRI /st 02:00'
+        Description = 'Automated daily trading pipeline [Mon-Fri at 3:30 AM IST = 6:00 PM EDT / 5:00 PM EST, after US market close]'
+        Schedule    = 'weekly /d MON,TUE,WED,THU,FRI /st 03:30'
         Target      = $TraderBat
     },
     @{
@@ -91,8 +91,8 @@ $Tasks = @(
     },
     @{
         Name        = 'AI-Stock-Trader\AI-Stock-Trader-DailyStatus'
-        Description = 'Nightly portfolio status report [Mon-Fri at 3:00 AM IST]'
-        Schedule    = 'weekly /d MON,TUE,WED,THU,FRI /st 03:00'
+        Description = 'Nightly portfolio status report [Mon-Fri at 4:00 AM IST]'
+        Schedule    = 'weekly /d MON,TUE,WED,THU,FRI /st 04:00'
         Target      = $StatusBat
     },
     @{
@@ -164,6 +164,20 @@ foreach ($t in $Tasks) {
     }
 }
 
+# Reliability settings for the trading task (schtasks /create cannot set these, so a re-run of this
+# script must re-apply them): start on battery, never stop mid-run on battery, catch up a missed
+# start, and wake the PC.
+$DailyTask = Get-ScheduledTask -TaskPath '\AI-Stock-Trader' -TaskName 'AI-Stock-Trader-Daily' -ErrorAction SilentlyContinue
+if ($DailyTask) {
+    $DailySettings = $DailyTask.Settings
+    $DailySettings.DisallowStartIfOnBatteries = $false
+    $DailySettings.StopIfGoingOnBatteries = $false
+    $DailySettings.StartWhenAvailable = $true
+    $DailySettings.WakeToRun = $true
+    Set-ScheduledTask -TaskPath '\AI-Stock-Trader' -TaskName 'AI-Stock-Trader-Daily' -Settings $DailySettings | Out-Null
+    Write-Host "  [OK] AI-Stock-Trader-Daily: runs on battery, catches up missed starts, wakes the PC" -ForegroundColor Green
+}
+
 Write-Host ""
 Write-Host "=============================================================================" -ForegroundColor Cyan
 Write-Host " SETUP COMPLETE - AUTOMATION SUMMARY" -ForegroundColor Cyan
@@ -172,7 +186,7 @@ Write-Host "Active Tasks ($RegisteredCount of $($Tasks.Count) configured success
 Write-Host ""
 
 Write-Host "1. AI-Stock-Trader-Daily" -ForegroundColor Yellow
-Write-Host "   Schedule : Monday-Friday at 2:00 AM IST (after US market close)" -ForegroundColor Gray
+Write-Host "   Schedule : Monday-Friday at 3:30 AM IST (after US market close, EDT and EST)" -ForegroundColor Gray
 Write-Host "   Action   : $TraderBat" -ForegroundColor Gray
 Write-Host "   Purpose  : Runs daily pipeline after market close with error catching and log cleanup" -ForegroundColor Gray
 Write-Host ""
@@ -196,7 +210,7 @@ Write-Host "   Purpose  : Ensures Streamlit UI is running in background at http:
 Write-Host ""
 
 Write-Host "5. AI-Stock-Trader-DailyStatus" -ForegroundColor Yellow
-Write-Host "   Schedule : Monday-Friday at 3:00 AM IST" -ForegroundColor Gray
+Write-Host "   Schedule : Monday-Friday at 4:00 AM IST" -ForegroundColor Gray
 Write-Host "   Action   : $StatusBat" -ForegroundColor Gray
 Write-Host "   Purpose  : Generates plain-English portfolio digest and alerts to console and logs" -ForegroundColor Gray
 Write-Host ""

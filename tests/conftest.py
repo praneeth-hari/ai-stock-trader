@@ -31,6 +31,18 @@ def _session_test_database(tmp_path_factory):
     repository._engine = None
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _session_lock_dir(tmp_path_factory):
+    """Tests use their own trading-cycle lock directory, so they never block (or are blocked by)
+    a real scheduled run on this machine."""
+    from config.settings import settings
+
+    original = settings.pipeline_lock_dir
+    settings.pipeline_lock_dir = tmp_path_factory.mktemp("locks")
+    yield settings.pipeline_lock_dir
+    settings.pipeline_lock_dir = original
+
+
 @pytest.fixture(autouse=True)
 def _reset_database_between_tests(_session_test_database):
     """Start every test on the isolated copy with a fresh engine, so a test that pointed db_url

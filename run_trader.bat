@@ -75,13 +75,20 @@ echo. >> "%TODAY_LOG%"
 set "PIPELINE_EXIT=%ERRORLEVEL%"
 
 echo. >> "%TODAY_LOG%"
-if %PIPELINE_EXIT% neq 0 (
+:: Exit codes (src/pipeline/scheduler.py EXIT_CODES): 0 success/skipped, 2 degraded, 3 halted, else failed.
+if %PIPELINE_EXIT% equ 0 (
+    echo [SUCCESS] Pipeline execution finished successfully at %TIME% >> "%TODAY_LOG%"
+    echo [SUCCESS] Daily pipeline run complete for %TODAY%.
+) else if %PIPELINE_EXIT% equ 2 (
+    echo [DEGRADED] Pipeline completed and committed on partial inputs ^(exit code 2^) at %TIME% >> "%TODAY_LOG%"
+    echo [DEGRADED] Daily pipeline completed with degraded inputs. Check log: %TODAY_LOG%
+) else if %PIPELINE_EXIT% equ 3 (
+    echo [HALTED] Pipeline deliberately not run: kill switch or run in progress ^(exit code 3^) at %TIME% >> "%TODAY_LOG%"
+    echo [HALTED] Daily pipeline halted. Check log: %TODAY_LOG%
+) else (
     echo [ERROR] PIPELINE FAILED with exit code %PIPELINE_EXIT% at %TIME% >> "%TODAY_LOG%"
     echo PIPELINE FAILED: Execution exited with error code %PIPELINE_EXIT% >> "%TODAY_LOG%"
     echo [ERROR] PIPELINE FAILED with exit code %PIPELINE_EXIT%. Check log: %TODAY_LOG%
-) else (
-    echo [SUCCESS] Pipeline execution finished successfully at %TIME% >> "%TODAY_LOG%"
-    echo [SUCCESS] Daily pipeline run complete for %TODAY%.
 )
 
 :: 4. Automatic Log Cleanup (>30 days old) (Part 2, Item 5)

@@ -142,6 +142,9 @@ class PortfolioSnapshot(Base):
     highest_price_since_entry: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     trailing_stop_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     positions: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    # Orders queued for the next open, committed in the same row as cash/positions so a run's
+    # effects are all-or-nothing. NULL only on snapshots written before this column existed.
+    pending_orders: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, nullable=False
     )

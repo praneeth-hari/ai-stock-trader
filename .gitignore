@@ -7,6 +7,7 @@ data/processed/
 data/models/
 data/pending_orders_*.json
 data/backtest_cache/
+data/locks/
 models/*.pkl
 reports/*.pdf
 reports/*.csv

@@ -48,6 +48,23 @@ def _pending_orders_path(market: str) -> Path:
     return Path(PENDING_ORDERS_DIR) / f"pending_orders_{market.lower()}.json"
 
 
+def _order_from_dict(d: Dict[str, Any]) -> OrderSpec:
+    return OrderSpec(
+        date=d.get("date", ""),
+        ticker=d.get("ticker", ""),
+        action=d.get("action", ""),
+        order_type=d.get("order_type", "MARKET"),
+        shares=float(d.get("shares", 0.0)),
+        reference_price=float(d.get("reference_price", 0.0)),
+        gross_value=float(d.get("gross_value", 0.0)),
+        estimated_fee=float(d.get("estimated_fee", 0.0)),
+        net_amount=float(d.get("net_amount", 0.0)),
+        reason=d.get("reason", ""),
+        adv=d.get("adv"),
+        confidence_tier=d.get("confidence_tier"),
+    )
+
+
 # ── Dataclasses ───────────────────────────────────────────────────────────────
 
 @dataclass
@@ -230,11 +247,17 @@ class PaperBroker:
             )
 
         if not self.pending_orders:
-            cached = _pending_orders_cache.get(self.market)
-            if cached:
-                self.pending_orders = list(cached)
+            committed = snap.get("pending_orders") if snap is not None else None
+            if committed is not None:
+                # The committed snapshot is authoritative: a run that crashed after clearing the
+                # cache/file mirror must not lose (or double-queue) the orders it had not committed.
+                self.pending_orders = [_order_from_dict(d) for d in committed]
             else:
-                self.pending_orders = self._load_pending_orders_file()
+                cached = _pending_orders_cache.get(self.market)
+                if cached:
+                    self.pending_orders = list(cached)
+                else:
+                    self.pending_orders = self._load_pending_orders_file()
 
         self._state_loaded = True
 
@@ -263,24 +286,7 @@ class PaperBroker:
         try:
             p = _pending_orders_path(self.market)
             if p.exists():
-                orders_data = json.loads(p.read_text())
-                res = []
-                for d in orders_data:
-                    res.append(OrderSpec(
-                        date=d.get("date", ""),
-                        ticker=d.get("ticker", ""),
-                        action=d.get("action", ""),
-                        order_type=d.get("order_type", "MARKET"),
-                        shares=float(d.get("shares", 0.0)),
-                        reference_price=float(d.get("reference_price", 0.0)),
-                        gross_value=float(d.get("gross_value", 0.0)),
-                        estimated_fee=float(d.get("estimated_fee", 0.0)),
-                        net_amount=float(d.get("net_amount", 0.0)),
-                        reason=d.get("reason", ""),
-                        adv=d.get("adv"),
-                        confidence_tier=d.get("confidence_tier"),
-                    ))
-                return res
+                return [_order_from_dict(d) for d in json.loads(p.read_text())]
         except Exception as exc:
             logger.debug("Could not load pending orders file: %s", exc)
         return []
@@ -647,6 +653,7 @@ class PaperBroker:
             positions=positions_blob,
             total_slippage_cost=self.total_slippage_cost,
             market=self.market,
+            pending_orders=[o.to_dict() for o in self.pending_orders],
         )
 
         logger.info(

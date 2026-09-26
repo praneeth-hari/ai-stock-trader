@@ -265,6 +265,10 @@ def create_all_tables() -> None:
                 if "trailing_stop_price" not in cols:
                     conn.execute(text("ALTER TABLE portfolio ADD COLUMN trailing_stop_price FLOAT"))
                     conn.commit()
+                if "pending_orders" not in cols:
+                    conn.execute(text("ALTER TABLE portfolio ADD COLUMN pending_orders JSON"))
+                    conn.commit()
+                    logger.info("Migrated schema: added portfolio.pending_orders")
                     logger.info("Migrated schema: added portfolio.trailing_stop_price")
 
             if "orders" in table_names:
@@ -561,8 +565,10 @@ def save_portfolio_snapshot(
     positions: Optional[Dict[str, Any]] = None,
     total_slippage_cost: float = 0.0,
     market: str = "US",
+    pending_orders: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
-    """Upsert a portfolio snapshot tagged by market ('US' or 'INDIA'). Silently skips in stateless mode."""
+    """Upsert a portfolio snapshot tagged by market ('US' or 'INDIA'). Silently skips in stateless mode.
+    pending_orders (when given) is committed in the same row as cash/positions; None leaves it unset."""
     if not _db_available:
         return
     _assert_safe_write_target()
@@ -583,12 +589,15 @@ def save_portfolio_snapshot(
                 total_value=total_value,
                 total_slippage_cost=float(total_slippage_cost),
                 positions=positions or {},
+                pending_orders=pending_orders,
             ))
         else:
             existing.cash = cash
             existing.total_value = total_value
             existing.total_slippage_cost = float(total_slippage_cost)
             existing.positions = positions or {}
+            if pending_orders is not None:
+                existing.pending_orders = pending_orders
 
         session.commit()
 
@@ -616,6 +625,7 @@ def get_portfolio_snapshot(run_date: str, market: str = "US") -> Optional[Dict[s
             "total_value": row.total_value,
             "total_slippage_cost": getattr(row, "total_slippage_cost", 0.0) or 0.0,
             "positions": row.positions,
+            "pending_orders": getattr(row, "pending_orders", None),
         }
 
 
@@ -642,7 +652,68 @@ def get_latest_portfolio_snapshot(market: str = "US") -> Optional[Dict[str, Any]
             "total_value": row.total_value,
             "total_slippage_cost": getattr(row, "total_slippage_cost", 0.0) or 0.0,
             "positions": row.positions,
+            "pending_orders": getattr(row, "pending_orders", None),
         }
+
+
+def rollback_uncommitted_executions(market: str = "US") -> Dict[str, Any]:
+    """
+    Crash recovery, run at the start of every pipeline run.
+
+    A run's fills are only durable once that run's end-of-day snapshot commits. Orders/trades
+    recorded for a run_date after the latest committed snapshot come from a run that did not
+    finish: its snapshot (and the pending orders inside it) still describe the state before those
+    fills. They are copied into a CRITICAL audit event and deleted in one transaction, so the
+    committed pending orders are executed exactly once when the pipeline re-runs.
+    """
+    result: Dict[str, Any] = {"committed_run_date": None, "orders": [], "trades": []}
+    if not _db_available:
+        return result
+    _assert_safe_write_target()
+    market_clean = str(market).strip().upper()
+    with Session(get_engine()) as session:
+        snap = session.execute(
+            select(PortfolioSnapshot).where(PortfolioSnapshot.market == market_clean)
+            .order_by(PortfolioSnapshot.run_date.desc()).limit(1)
+        ).scalar_one_or_none()
+        if snap is None:
+            return result
+        committed = snap.run_date
+        result["committed_run_date"] = committed
+        o_rows = session.execute(
+            select(OrderRow).where(OrderRow.market == market_clean, OrderRow.run_date > committed)
+        ).scalars().all()
+        t_rows = session.execute(
+            select(TradeRow).where(TradeRow.market == market_clean, TradeRow.run_date > committed)
+        ).scalars().all()
+        if not o_rows and not t_rows:
+            return result
+        result["orders"] = [
+            {"run_date": r.run_date, "ticker": r.ticker, "action": r.action, "quantity": r.quantity,
+             "price": r.price, "reason": r.reason} for r in o_rows
+        ]
+        result["trades"] = [
+            {"run_date": r.run_date, "ticker": r.ticker, "action": r.action, "quantity": r.quantity,
+             "fill_price": r.fill_price, "cost": r.cost, "slippage_cost": r.slippage_cost,
+             "net_pnl": r.net_pnl} for r in t_rows
+        ]
+        for r in list(o_rows) + list(t_rows):
+            session.delete(r)
+        session.add(EventLog(
+            level="CRITICAL",
+            component=f"recovery_{market_clean.lower()}",
+            message=(
+                f"RECOVERY: rolled back {len(o_rows)} order(s) and {len(t_rows)} trade(s) recorded after the "
+                f"last committed snapshot ({committed}) by a run that did not finish; its still-pending "
+                f"orders will be executed once by this run."
+            ),
+            details={"status": "ROLLED_BACK_UNCOMMITTED", "market": market_clean,
+                     "committed_run_date": committed, **{k: result[k] for k in ("orders", "trades")}},
+        ))
+        session.commit()
+    logger.critical("RECOVERY [%s]: rolled back %d order(s), %d trade(s) after committed snapshot %s.",
+                    market_clean, len(result["orders"]), len(result["trades"]), committed)
+    return result
 
 
 def get_portfolio_snapshots(limit: int = 500, market: str = "US") -> List[Dict[str, Any]]:

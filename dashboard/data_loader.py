@@ -45,6 +45,9 @@ def get_last_pipeline_status() -> Dict[str, Any]:
         ts = str(e.get("timestamp", ""))
 
         if comp in ("daily_pipeline", "scheduler"):
+            for explicit in ("FAILED", "DEGRADED", "HALTED", "SKIPPED"):
+                if f"Status={explicit}" in msg:
+                    return {"status": explicit, "message": msg, "timestamp": ts}
             if "Pipeline complete" in msg or "Scheduled pipeline run completed" in msg:
                 if "Status=FAILED" in msg or "status: FAILED" in msg or "Status=PARTIAL_SUCCESS" in msg:
                     return {"status": "FAILED" if "Status=FAILED" in msg else "PARTIAL_SUCCESS", "message": msg, "timestamp": ts}

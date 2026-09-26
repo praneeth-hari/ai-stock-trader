@@ -172,6 +172,13 @@ def is_after_market_close(now_dt: Optional[datetime] = None) -> Tuple[bool, str]
     )
 
 
+# Process exit codes seen by run_trader.bat / Task Scheduler.
+#   0 = SUCCESS or SKIPPED (nothing to do)   2 = DEGRADED (completed and committed on partial inputs)
+#   1 = FAILED (day not committed, or no decisions possible; also any unhandled crash)
+#   3 = HALTED (kill switch / another run in progress)
+EXIT_CODES = {"SUCCESS": 0, "SKIPPED": 0, "DEGRADED": 2, "FAILED": 1, "HALTED": 3}
+
+
 # ── Scheduled Job Execution ───────────────────────────────────────────────────
 
 def execute_scheduled_job(
@@ -230,41 +237,41 @@ def execute_scheduled_job(
         result = run_daily_pipeline(run_date=today_str)
         elapsed = (datetime.now() - start_time).total_seconds()
 
-        if result.errors:
-            logger.error(
-                "Scheduled pipeline finished with errors for %s in %.2fs. Errors: %s",
-                today_str, elapsed, result.errors,
-            )
+        status = result.status
+        details = {
+            "run_date": today_str,
+            "status": status,
+            "fills": len(result.fills),
+            "orders": result.orders_generated,
+            "total_equity": result.total_equity,
+            "errors": result.errors,
+            "intelligence": result.intelligence,
+        }
+        if status == "FAILED":
+            logger.error("Scheduled pipeline FAILED for %s in %.2fs. Errors: %s", today_str, elapsed, result.errors)
             repository.log_event(
-                level="ERROR",
-                component="scheduler",
-                message=f"Scheduled pipeline run failed for {today_str}: {result.errors[0]}",
-                details={
-                    "run_date": today_str,
-                    "errors": result.errors,
-                    "status": "FAILED",
-                },
+                level="ERROR", component="scheduler",
+                message=f"Scheduled pipeline run failed for {today_str}: Status=FAILED — {result.errors[0] if result.errors else 'unknown'}",
+                details=details,
             )
-        else:
-            logger.info(
-                "Scheduled pipeline completed successfully for %s in %.2fs. Fills=%d, Orders=%d, Equity=$%.2f",
-                today_str,
-                elapsed,
-                len(result.fills),
-                result.orders_generated,
-                result.total_equity,
-            )
+        elif status in ("SUCCESS", "DEGRADED"):
+            first_issue = (result.errors[0] if result.errors else
+                           next((f"{n}: {i['status']}" for n, i in result.intelligence.items() if i["status"] != "SUCCESS"), ""))
+            logger.log(logging.INFO if status == "SUCCESS" else logging.WARNING,
+                       "Scheduled pipeline %s for %s in %.2fs. Fills=%d, Orders=%d, Equity=$%.2f",
+                       status, today_str, elapsed, len(result.fills), result.orders_generated, result.total_equity)
             repository.log_event(
-                level="INFO",
-                component="scheduler",
-                message=f"Scheduled pipeline run completed for {today_str} ({elapsed:.1f}s)",
-                details={
-                    "run_date": today_str,
-                    "fills": len(result.fills),
-                    "orders": result.orders_generated,
-                    "total_equity": result.total_equity,
-                    "status": "SUCCESS",
-                },
+                level="INFO" if status == "SUCCESS" else "WARNING", component="scheduler",
+                message=(f"Scheduled pipeline run completed for {today_str} ({elapsed:.1f}s). Status={status}"
+                         + (f" — {first_issue}" if status == "DEGRADED" and first_issue else "")),
+                details=details,
+            )
+        else:  # SKIPPED / HALTED
+            logger.warning("Scheduled pipeline not executed for %s: Status=%s — %s", today_str, status, result.errors)
+            repository.log_event(
+                level="WARNING" if status == "HALTED" else "INFO", component="scheduler",
+                message=f"Scheduled pipeline run not executed for {today_str}: Status={status} ({result.regime})",
+                details=details,
             )
         return result
 
@@ -348,10 +355,11 @@ def main() -> None:
         res = execute_scheduled_job(run_date=target_date, force=args.force)
         if res is not None:
             print("\n" + res.to_markdown())
-            if res.errors and res.tickers_valid == 0 and res.regime != "SKIPPED_MARKET_CLOSED":
-                print("PIPELINE FAILED: " + "; ".join(res.errors))
-                sys.exit(1)
-            sys.exit(0)
+            code = EXIT_CODES.get(res.status, 1)
+            print(f"PIPELINE STATUS: {res.status} (exit code {code})")
+            if res.status in ("FAILED", "DEGRADED", "HALTED"):
+                print(f"PIPELINE {res.status}: " + "; ".join(res.errors))
+            sys.exit(code)
         else:
             print("Cycle did not execute (market closed or failure logged).")
             if args.force:

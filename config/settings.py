@@ -247,6 +247,11 @@ class Settings(BaseSettings):
         default=Path("data/models"),
         description="Directory where trained model artefacts are saved.",
     )
+    pipeline_lock_dir: Path = Field(
+        default=Path("data/locks"),
+        description="Directory for the machine-wide trading-cycle lock files (relative paths resolve "
+                    "from the project root, so every process on this machine uses the same lock).",
+    )
 
     # ── Database ──────────────────────────────────────────────────────────────
     db_url: str = Field(

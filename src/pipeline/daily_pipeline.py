@@ -65,6 +65,7 @@ from src.intelligence import (
     get_universe_earnings_calendar,
 )
 from src.ml.evaluate import load_active_model, verify_frozen_active_model
+from src.pipeline.run_lock import PipelineLockBusy, pipeline_run_lock
 from src.portfolio.portfolio import OrderSpec, allocate_portfolio
 from src.ranking.ranking import rank_candidates
 from src.risk.risk_engine import evaluate_portfolio_risk
@@ -92,8 +93,42 @@ _pipeline_lock = threading.Lock()
 
 # ── Pipeline result dataclass ─────────────────────────────────────────────────
 
+def _assert_latest_bar_complete(df: pd.DataFrame, symbol: str) -> None:
+    """Refuse a daily bar for the current New York date until market close + settlement buffer:
+    before then its 'close' is still moving, so deciding on it would use an unfinished bar."""
+    from zoneinfo import ZoneInfo
+    from src.pipeline.scheduler import is_after_market_close
+
+    ny_today = datetime.now(ZoneInfo(settings.market_hours_timezone)).strftime("%Y-%m-%d")
+    latest = str(df["date"].max())
+    if latest >= ny_today:
+        is_after, reason = is_after_market_close()
+        if not is_after:
+            raise ValueError(
+                f"INCOMPLETE_BAR: {symbol} latest bar {latest} is the current New York session and {reason}. "
+                "Refusing to decide on a bar that has not closed."
+            )
+
+
+SKIPPED_REGIMES = ("SKIPPED_MARKET_CLOSED", "ALREADY_RUN")
+HALTED_REGIMES = ("KILL_SWITCH_ACTIVE", "CONCURRENT_RUN_REJECTED")
+
+# V1 rule (deliberate, not a fallback): if the frozen model cannot be verified or inference fails,
+# the run halts before touching the portfolio. No pending orders are filled, no exits (including
+# stop-loss/take-profit) are evaluated, no new orders are queued and no snapshot is written; the
+# committed portfolio and its pending orders are left exactly as they were for the next run.
+MODEL_FAILURE_POLICY = "HALT_ALL"
+
+
 class DailyPipelineResult:
-    """Summary of a single daily pipeline execution."""
+    """Summary of a single daily pipeline execution.
+
+    status: SUCCESS  - completed with all inputs;
+            DEGRADED - completed and committed, but some tickers or intelligence inputs fell back;
+            FAILED   - aborted before committing the day (or could not make decisions);
+            SKIPPED  - nothing to do (market closed, already executed);
+            HALTED   - deliberately not run (kill switch, another run in progress).
+    """
 
     def __init__(
         self,
@@ -108,6 +143,8 @@ class DailyPipelineResult:
         cash: float,
         total_equity: float,
         errors: List[str],
+        status: Optional[str] = None,
+        intelligence: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> None:
         self.run_date = run_date
         self.tickers_fetched = tickers_fetched
@@ -120,6 +157,15 @@ class DailyPipelineResult:
         self.cash = cash
         self.total_equity = total_equity
         self.errors = errors
+        self.intelligence = intelligence or {}
+        if status is None:
+            if regime in SKIPPED_REGIMES:
+                status = "SKIPPED"
+            elif regime in HALTED_REGIMES:
+                status = "HALTED"
+            else:
+                status = "FAILED" if errors else "SUCCESS"
+        self.status = status
 
     def to_markdown(self) -> str:
         """Format the daily run result as a human-readable markdown audit report."""
@@ -130,6 +176,8 @@ class DailyPipelineResult:
 
         lines = [
             f"## Daily Pipeline Audit — {self.run_date}",
+            "",
+            f"- Status: **{self.status}**",
             "",
             "### Data Fetch & Validation",
             f"- Tickers fetched: **{self.tickers_fetched}**",
@@ -224,42 +272,61 @@ def run_daily_pipeline(
         logger.info("India pipeline hour check: current IST hour = %d", now_ist.hour)
 
     # ── Concurrency Mutex Guard ───────────────────────────────────────────────
-    acquired = _pipeline_lock.acquire(blocking=False)
-    if not acquired:
-        target_date_str = run_date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        msg = f"CONCURRENT RUN BLOCKED: Daily pipeline is already actively executing. Skipping concurrent trigger for {target_date_str}."
-        logger.warning(msg)
-        repository.log_event(
-            "WARNING", "daily_pipeline", msg,
-            {"run_date": target_date_str, "status": "CONCURRENT_RUN_REJECTED"}
-        )
-        return DailyPipelineResult(
-            run_date=target_date_str,
-            tickers_fetched=0,
-            tickers_valid=0,
-            tickers_skipped=0,
-            regime="CONCURRENT_RUN_REJECTED",
-            orders_generated=0,
-            fills=[],
-            pending_orders=[],
-            cash=0.0,
-            total_equity=0.0,
-            errors=[msg],
-        )
-
+    # In-process lock first (threads), then the machine-wide OS lock (other processes: scheduled task,
+    # dashboard, CLI). The machine-wide lock is held for the entire trading cycle below.
+    market = _resolve_market(market_name, tickers)
+    if not _pipeline_lock.acquire(blocking=False):
+        return _concurrent_run_rejected(run_date, market, "another run is executing in this process", {})
     try:
-        return _run_daily_pipeline_internal(
-            run_date=run_date,
-            tickers=tickers,
-            fetch_start=fetch_start,
-            broker=broker,
-            _spy_df=_spy_df,
-            _universe_dfs=_universe_dfs,
-            force=force,
-            market_name=market_name,
-        )
+        try:
+            with pipeline_run_lock(market):
+                return _run_daily_pipeline_internal(
+                    run_date=run_date,
+                    tickers=tickers,
+                    fetch_start=fetch_start,
+                    broker=broker,
+                    _spy_df=_spy_df,
+                    _universe_dfs=_universe_dfs,
+                    force=force,
+                    market_name=market_name,
+                )
+        except PipelineLockBusy as busy:
+            return _concurrent_run_rejected(run_date, market, str(busy), busy.holder)
     finally:
         _pipeline_lock.release()
+
+
+def _resolve_market(market_name: Optional[str], tickers: Optional[List[str]]) -> str:
+    if market_name:
+        return str(market_name).strip().upper()
+    if tickers and any(str(t).endswith(".NS") or str(t).endswith(".BO") for t in tickers):
+        return "INDIA"
+    return "US"
+
+
+def _concurrent_run_rejected(run_date: Optional[str], market: str, reason: str,
+                             holder: Dict[str, Any]) -> DailyPipelineResult:
+    target_date_str = run_date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    msg = (f"CONCURRENT RUN BLOCKED: {market} trading cycle already executing ({reason}). "
+           f"Skipping concurrent trigger for {target_date_str}; no orders placed.")
+    logger.warning(msg)
+    repository.log_event(
+        "WARNING", "daily_pipeline", msg,
+        {"run_date": target_date_str, "market": market, "status": "CONCURRENT_RUN_REJECTED", "lock_holder": holder},
+    )
+    return DailyPipelineResult(
+        run_date=target_date_str,
+        tickers_fetched=0,
+        tickers_valid=0,
+        tickers_skipped=0,
+        regime="CONCURRENT_RUN_REJECTED",
+        orders_generated=0,
+        fills=[],
+        pending_orders=[],
+        cash=0.0,
+        total_equity=0.0,
+        errors=[msg],
+    )
 
 
 def _run_daily_pipeline_internal(
@@ -278,13 +345,7 @@ def _run_daily_pipeline_internal(
     if run_date is None:
         run_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-    if market_name:
-        market_name = str(market_name).strip().upper()
-    elif tickers:
-        is_india = any(str(t).endswith(".NS") or str(t).endswith(".BO") for t in tickers)
-        market_name = "INDIA" if is_india else "US"
-    else:
-        market_name = "US"
+    market_name = _resolve_market(market_name, tickers)
 
     if tickers is None:
         tickers = settings.get_universe(market_name)
@@ -368,6 +429,15 @@ def _run_daily_pipeline_internal(
     repository.log_event("INFO", "daily_pipeline", f"Pipeline started for {run_date}",
                          {"run_date": run_date, "tickers": tickers})
 
+    # Crash recovery: undo fills from any earlier run that never committed its end-of-day snapshot,
+    # so the pending orders still held in the last committed snapshot execute exactly once.
+    recovery = repository.rollback_uncommitted_executions(market=market_name)
+    if recovery["orders"] or recovery["trades"]:
+        errors.append(
+            f"RECOVERY: rolled back {len(recovery['orders'])} uncommitted order(s) and "
+            f"{len(recovery['trades'])} trade(s) after committed snapshot {recovery['committed_run_date']}"
+        )
+
     # ── 1. Fetch & Validate SPY (benchmark) ───────────────────────────────────
     if _spy_df is not None:
         spy_clean = _spy_df.copy().sort_values("date").reset_index(drop=True)
@@ -379,6 +449,8 @@ def _run_daily_pipeline_internal(
             tickers_fetched += 1
             val_spy = validate_ticker_data(spy_raw, ticker=benchmark_symbol)
             spy_clean = val_spy.cleaned_df.sort_values("date").reset_index(drop=True)
+            if market_name == "US":
+                _assert_latest_bar_complete(spy_clean, benchmark_symbol)
             logger.info("SPY validated: %d rows through %s.", len(spy_clean), run_date)
             try:
                 repository.save_market_data(spy_clean)
@@ -486,6 +558,11 @@ def _run_daily_pipeline_internal(
         logger.warning("Failed to save features to repository: %s", exc)
 
     # ── 3b. Section 5: Gather Market Intelligence Layers ──────────────────────
+    # Each input falls back to neutral on failure (unchanged decisions), but its status is recorded
+    # explicitly so a neutral fallback is never indistinguishable from real intelligence.
+    intelligence: Dict[str, Dict[str, Any]] = {}
+    n_valid = len(tickers_valid_list)
+
     # A. News Sentiment Analysis (VADER)
     try:
         sentiment_result = analyze_universe_sentiment(
@@ -493,9 +570,17 @@ def _run_daily_pipeline_internal(
             date_str=run_date,
             persist=True,
         )
+        scores = getattr(sentiment_result, "scores", {}) or {}
+        missing = [t for t in tickers_valid_list
+                   if t.upper() not in scores or scores[t.upper()].sentiment_label == "UNAVAILABLE"]
+        intelligence["sentiment"] = (
+            {"status": "DEGRADED", "detail": f"{len(missing)}/{n_valid} tickers without headlines, neutral used: {missing}"}
+            if missing else {"status": "SUCCESS", "detail": f"{n_valid}/{n_valid} tickers scored"}
+        )
     except Exception as exc:
         logger.warning("SENTIMENT_UNAVAILABLE: Sentiment analysis failed (%s). Continuing normally.", exc)
         sentiment_result = None
+        intelligence["sentiment"] = {"status": "FAILED", "detail": f"{exc}; neutral used for all tickers, no sentiment veto"}
 
     # B. Earnings Calendar Awareness
     try:
@@ -504,9 +589,16 @@ def _run_daily_pipeline_internal(
             as_of_date_str=run_date,
             persist=True,
         )
+        cal = getattr(earnings_result, "calendar", {}) or {}
+        unknown = [t for t in tickers_valid_list if t.upper() not in cal or cal[t.upper()].status == "UNKNOWN"]
+        intelligence["earnings"] = (
+            {"status": "DEGRADED", "detail": f"{len(unknown)}/{n_valid} tickers without an earnings date, blackout not applied: {unknown}"}
+            if unknown else {"status": "SUCCESS", "detail": f"{n_valid}/{n_valid} tickers with an earnings date"}
+        )
     except Exception as exc:
         logger.warning("Earnings calendar retrieval failed (%s). Continuing normally.", exc)
         earnings_result = None
+        intelligence["earnings"] = {"status": "FAILED", "detail": f"{exc}; no earnings blackout or caution sizing applied"}
 
     # C. Sector Rotation Intelligence
     try:
@@ -515,9 +607,15 @@ def _run_daily_pipeline_internal(
             as_of_date=run_date,
             persist=True,
         )
+        empty = [r.sector for r in getattr(sector_result, "rankings", []) if r.stock_count == 0]
+        intelligence["sector"] = (
+            {"status": "DEGRADED", "detail": f"sectors with no price data (ranked on 0.0): {empty}"}
+            if empty else {"status": "SUCCESS", "detail": "all sectors ranked"}
+        )
     except Exception as exc:
         logger.warning("Sector rotation calculation failed (%s). Continuing normally.", exc)
         sector_result = None
+        intelligence["sector"] = {"status": "FAILED", "detail": f"{exc}; no sector modifier applied"}
 
     # D. Macro Economic Indicators
     try:
@@ -525,9 +623,21 @@ def _run_daily_pipeline_internal(
             as_of_date_str=run_date,
             persist=True,
         )
+        if getattr(macro_result, "source_date", "") == "BASELINE_DEFAULT":
+            intelligence["macro"] = {"status": "DEGRADED", "detail": "no FRED data or cache; baseline defaults used "
+                                                                     f"(regime {macro_result.macro_regime})"}
+        else:
+            intelligence["macro"] = {"status": "SUCCESS", "detail": f"regime {macro_result.macro_regime} from "
+                                                                    f"{macro_result.source_date}"}
     except Exception as exc:
         logger.warning("Macro environment inspection failed (%s). Continuing normally.", exc)
         macro_result = None
+        intelligence["macro"] = {"status": "FAILED", "detail": f"{exc}; full position size, no buy-bar shift"}
+
+    for name, info in intelligence.items():
+        if info["status"] != "SUCCESS":
+            repository.log_event("WARNING", market_comp, f"INTELLIGENCE_{info['status']}: {name} — {info['detail']}",
+                                 {"run_date": run_date, "input": name, **info})
 
     # ── 4. Load Active Model & Rank ────────────────────────────────────────────
     try:
@@ -587,10 +697,20 @@ def _run_daily_pipeline_internal(
             except Exception as exc:
                 logger.warning("Failed to save predictions to database: %s", exc)
     except Exception as exc:
-        err = f"CRITICAL: Ranking/model inference failed: {exc}"
+        committed = repository.get_latest_portfolio_snapshot(market=market_name) or {}
+        held = sorted((committed.get("positions") or {}).keys())
+        n_pending = len(committed.get("pending_orders") or [])
+        err = (
+            f"CRITICAL: Ranking/model inference failed: {exc}. V1 rule {MODEL_FAILURE_POLICY}: no fills, "
+            f"no exits (incl. stop-loss/take-profit), no new orders; held positions {held} and "
+            f"{n_pending} pending order(s) left untouched until a verified model is restored."
+        )
         logger.critical(err)
         errors.append(err)
-        repository.log_event("CRITICAL", "daily_pipeline", err)
+        repository.log_event("CRITICAL", "daily_pipeline", err, {
+            "run_date": run_date, "status": "FAILED", "policy": MODEL_FAILURE_POLICY,
+            "held_positions": held, "pending_orders_untouched": n_pending,
+        })
         try:
             send_pipeline_failure_alert(
                 error_message=err,
@@ -648,6 +768,14 @@ def _run_daily_pipeline_internal(
         broker.pending_orders.clear()
 
     for order in prior_pending:
+        if order.date and order.date >= run_date:
+            # Orders are generated by an earlier run and fill at the next open. One dated this run
+            # (or later) can only come from an interrupted run of the same date; never fill it here.
+            msg = (f"LAG RULE: discarding pending {order.action} {order.ticker} generated on {order.date}; "
+                   f"it cannot fill in run {run_date}")
+            logger.warning(msg)
+            repository.log_event("WARNING", market_comp, msg, {"run_date": run_date, "order": order.to_dict()})
+            continue
         fill_price = open_prices.get(order.ticker)
         if fill_price is None or fill_price <= 0:
             fill_price = current_prices.get(order.ticker)
@@ -869,7 +997,16 @@ def _run_daily_pipeline_internal(
     except Exception as _lb_exc:
         logger.warning("Leaderboard cycle run skipped: %s", _lb_exc)
 
-    status_str = "SUCCESS" if not errors else ("PARTIAL_SUCCESS" if len(tickers_valid_list) > 0 else "FAILED")
+    # The day is committed (snapshot saved). FAILED here means decisions could not be made (e.g.
+    # allocation crashed); DEGRADED means it ran on partial inputs (skipped tickers, intelligence
+    # fallbacks, crash recovery).
+    intel_degraded = [n for n, i in intelligence.items() if i["status"] != "SUCCESS"]
+    if any(e.startswith("CRITICAL") for e in errors):
+        status_str = "FAILED"
+    elif errors or intel_degraded:
+        status_str = "DEGRADED"
+    else:
+        status_str = "SUCCESS"
     repository.log_event(
         "INFO" if status_str == "SUCCESS" else "WARNING", market_comp,
         f"Pipeline complete for {run_date} ({market_name}). Status={status_str}, Fills={len(fills)}, Equity=${total_equity:.4f}, Slippage=${broker.total_slippage_cost:.4f}",
@@ -883,6 +1020,7 @@ def _run_daily_pipeline_internal(
             "total_equity": total_equity,
             "total_slippage_cost": broker.total_slippage_cost,
             "errors": errors,
+            "intelligence": intelligence,
         },
     )
 
@@ -925,6 +1063,8 @@ def _run_daily_pipeline_internal(
         cash=broker.cash,
         total_equity=total_equity,
         errors=errors,
+        status=status_str,
+        intelligence=intelligence,
     )
 
 
