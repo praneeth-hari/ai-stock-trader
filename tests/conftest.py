@@ -1,6 +1,48 @@
 """Suite-wide test isolation: tests must never write production state or tracked reports."""
 
+import sqlite3
+from pathlib import Path
+
 import pytest
+
+PRODUCTION_DB = Path(__file__).resolve().parents[1] / "data" / "processed" / "trader.db"
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _session_test_database(tmp_path_factory):
+    """The whole session runs on a private copy of trader.db: tests can read real market data,
+    but no test can write the production database."""
+    from config.settings import settings
+    from src.db import repository
+
+    copy = tmp_path_factory.mktemp("db") / "trader_test_copy.db"
+    if PRODUCTION_DB.exists():
+        src = sqlite3.connect(f"file:{PRODUCTION_DB}?mode=ro", uri=True)
+        dst = sqlite3.connect(copy)
+        src.backup(dst)
+        dst.close()
+        src.close()
+    url = f"sqlite:///{copy.as_posix()}"
+    original = settings.db_url
+    settings.db_url = url
+    repository._engine = None
+    yield url
+    settings.db_url = original
+    repository._engine = None
+
+
+@pytest.fixture(autouse=True)
+def _reset_database_between_tests(_session_test_database):
+    """Start every test on the isolated copy with a fresh engine, so a test that pointed db_url
+    elsewhere (or cached an engine) cannot leak into the next one."""
+    from config.settings import settings
+    from src.db import repository
+
+    settings.db_url = _session_test_database
+    repository._engine = None
+    yield
+    settings.db_url = _session_test_database
+    repository._engine = None
 
 
 @pytest.fixture(autouse=True)

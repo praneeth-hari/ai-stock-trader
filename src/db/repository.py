@@ -98,7 +98,11 @@ def _assert_safe_write_target() -> None:
     """
     if os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("PREVENT_PROD_DB_WRITE") == "1":
         clean_url = str(settings.db_url).replace("\\", "/")
-        if "data/processed/trader.db" in clean_url and os.environ.get("ALLOW_PROD_TEST_WRITE") != "1":
+        # The cached engine can still point at production after settings.db_url was patched without
+        # resetting _engine, so check the engine's actual target as well as the configured URL.
+        engine_url = str(getattr(_engine, "url", "") or "").replace("\\", "/")
+        targets_prod = "data/processed/trader.db" in clean_url or "data/processed/trader.db" in engine_url
+        if targets_prod and os.environ.get("ALLOW_PROD_TEST_WRITE") != "1":
             raise RuntimeError(
                 f"PRODUCTION DATABASE WRITE BLOCKED: Execution context is a test or guarded demo "
                 f"({os.environ.get('PYTEST_CURRENT_TEST', 'PREVENT_PROD_DB_WRITE=1')}), but settings.db_url points "
@@ -843,6 +847,7 @@ def log_event(
         # Degrade gracefully: emit to Python logger instead of crashing
         logger.info("[STATELESS EVENT] [%s] %s: %s", level.upper(), component, message)
         return
+    _assert_safe_write_target()
     try:
         with Session(get_engine()) as session:
             session.add(EventLog(
@@ -1452,6 +1457,7 @@ def save_kill_switch_state(enabled: bool, reason: str = "") -> None:
     """Persists kill switch state to DB so it survives restarts."""
     if not _db_available:
         return
+    _assert_safe_write_target()
     try:
         with Session(get_engine()) as session:
             existing = session.query(EventLog).filter(
@@ -1533,6 +1539,7 @@ def save_india_portfolio(cash: float, positions: dict) -> None:
     """Saves Indian portfolio state to DB as an event log entry."""
     if not _db_available:
         return
+    _assert_safe_write_target()
     try:
         import json
         with Session(get_engine()) as session:
