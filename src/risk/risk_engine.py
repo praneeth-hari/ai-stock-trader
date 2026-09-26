@@ -177,6 +177,10 @@ class RiskAssessmentResult:
     volatility_regime: str = "NORMAL_VOLATILITY"
     circuit_breaker_active: bool = False
     psi_value: Optional[float] = None
+    # Observability only (never read by any decision): buy candidates in the order they were
+    # evaluated, and the correlation check result for each candidate that reached it.
+    evaluated_candidates: List[str] = field(default_factory=list)
+    correlation_checks: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     @property
     def approved_orders(self) -> List[RiskDecision]:
@@ -678,9 +682,12 @@ def evaluate_portfolio_risk(
     )
 
     # Process candidates sequentially
+    evaluated_candidates: List[str] = []
+    correlation_checks: Dict[str, Dict[str, Any]] = {}
     for opp in candidates:
         ticker = opp.ticker.upper()
         p = opp.probability
+        evaluated_candidates.append(ticker)
 
         # Check Regime Filter first (§1.8)
         if not regime_on:
@@ -798,6 +805,14 @@ def evaluate_portfolio_risk(
             held_tickers=list(active_held_tickers),
             price_histories=price_histories,
         )
+        correlation_checks[ticker] = {
+            "held_at_check": sorted(active_held_tickers),
+            "max_correlation": corr_eval.max_correlation,
+            "max_correlated_ticker": corr_eval.max_correlated_ticker,
+            "warning": corr_eval.warning,
+            "allowed": corr_eval.allowed,
+            "result": corr_eval.veto_reason or ("CORRELATION_WARNING" if corr_eval.warning else "CORRELATION_OK"),
+        }
         if not corr_eval.allowed:
             vetoed_orders.append(
                 RiskDecision(
@@ -939,4 +954,6 @@ def evaluate_portfolio_risk(
         volatility_regime=vol_regime,
         circuit_breaker_active=is_macro_circuit_breaker,
         psi_value=psi_value,
+        evaluated_candidates=evaluated_candidates,
+        correlation_checks=correlation_checks,
     )

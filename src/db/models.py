@@ -219,6 +219,74 @@ class TradeRow(Base):
         )
 
 
+class DecisionLogRow(Base):
+    """
+    Observability only: one row per ranked ticker per trading cycle, explaining the decision.
+    Written after the day is committed; never read by any trading decision.
+    """
+    __tablename__ = "decision_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    market: Mapped[str] = mapped_column(String(10), nullable=False, default="US")
+    ticker: Mapped[str] = mapped_column(String(20), nullable=False)
+    model_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    raw_probability: Mapped[Optional[float]] = mapped_column(Float, nullable=True)   # NULL: held but not ranked
+    sector: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    sector_rank: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    sector_modifier: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    macro_state: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    regime_state: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    correlation: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    final_probability: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    buy_threshold: Mapped[float] = mapped_column(Float, nullable=False)
+    size_tier: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    decision: Mapped[str] = mapped_column(String(10), nullable=False)      # BUY / HOLD / SELL / REJECT
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    order_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # why an actual order won its slot
+    details: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint("run_date", "market", "ticker", name="uq_decision_log_run_market_ticker"),
+    )
+
+
+class BenchmarkSnapshotRow(Base):
+    """
+    Shadow benchmark portfolio (SPY held only while SPY >= its 200-day SMA), one row per trading
+    cycle. Completely separate from the V1 portfolio table; never read by any trading decision.
+    """
+    __tablename__ = "benchmark_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    benchmark: Mapped[str] = mapped_column(String(30), nullable=False)
+    run_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    decision_bar_date: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    cash: Mapped[float] = mapped_column(Float, nullable=False)
+    spy_shares: Mapped[float] = mapped_column(Float, nullable=False)
+    spy_close: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    sma_200: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    regime_risk_on: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    decision: Mapped[str] = mapped_column(String(30), nullable=False)
+    pending_action: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    equity: Mapped[float] = mapped_column(Float, nullable=False)
+    daily_return: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    cumulative_return: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    peak_equity: Mapped[float] = mapped_column(Float, nullable=False)
+    drawdown: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    details: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint("benchmark", "run_date", name="uq_benchmark_snapshot_run"),
+    )
+
+
 class EventLog(Base):
     """
     Structured audit log for every prediction, decision, skip, and error.

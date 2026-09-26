@@ -62,6 +62,8 @@ from sqlalchemy.orm import Session
 from config.settings import settings
 from src.db.models import (
     Base,
+    BenchmarkSnapshotRow,
+    DecisionLogRow,
     CorrelationMatrixRow,
     EarningsCalendarRow,
     EventLog,
@@ -714,6 +716,95 @@ def rollback_uncommitted_executions(market: str = "US") -> Dict[str, Any]:
     logger.critical("RECOVERY [%s]: rolled back %d order(s), %d trade(s) after committed snapshot %s.",
                     market_clean, len(result["orders"]), len(result["trades"]), committed)
     return result
+
+
+def get_earliest_portfolio_snapshot(market: str = "US") -> Optional[Dict[str, Any]]:
+    """The first committed snapshot for a market (the V1 day-0 baseline after the fresh start)."""
+    if not _db_available:
+        return None
+    market_clean = str(market).strip().upper()
+    with Session(get_engine()) as session:
+        row = session.execute(
+            select(PortfolioSnapshot).where(PortfolioSnapshot.market == market_clean)
+            .order_by(PortfolioSnapshot.run_date.asc()).limit(1)
+        ).scalar_one_or_none()
+        if row is None:
+            return None
+        return {"run_date": row.run_date, "cash": row.cash, "total_value": row.total_value, "positions": row.positions}
+
+
+_DECISION_COLUMNS = (
+    "ticker", "model_sha256", "raw_probability", "sector", "sector_rank", "sector_modifier", "macro_state",
+    "regime_state", "correlation", "final_probability", "buy_threshold", "size_tier", "decision", "reason",
+    "order_reason", "details",
+)
+
+
+def save_decision_log(run_date: str, market: str, rows: List[Dict[str, Any]]) -> int:
+    """Replace the decision log for (run_date, market) in one transaction (idempotent on re-runs)."""
+    if not _db_available:
+        return 0
+    _assert_safe_write_target()
+    market_clean = str(market).strip().upper()
+    with Session(get_engine()) as session:
+        session.query(DecisionLogRow).filter(
+            DecisionLogRow.run_date == run_date, DecisionLogRow.market == market_clean
+        ).delete(synchronize_session=False)
+        for r in rows:
+            session.add(DecisionLogRow(run_date=run_date, market=market_clean,
+                                       **{k: r.get(k) for k in _DECISION_COLUMNS}))
+        session.commit()
+    return len(rows)
+
+
+def get_decision_log(run_date: Optional[str] = None, market: str = "US", limit: int = 1000) -> List[Dict[str, Any]]:
+    if not _db_available:
+        return []
+    market_clean = str(market).strip().upper()
+    with Session(get_engine()) as session:
+        stmt = select(DecisionLogRow).where(DecisionLogRow.market == market_clean)
+        if run_date is not None:
+            stmt = stmt.where(DecisionLogRow.run_date == run_date)
+        rows = session.execute(stmt.order_by(DecisionLogRow.run_date.desc(), DecisionLogRow.id).limit(limit)).scalars().all()
+        return [{"run_date": r.run_date, "market": r.market, **{k: getattr(r, k) for k in _DECISION_COLUMNS}} for r in rows]
+
+
+_BENCHMARK_COLUMNS = (
+    "decision_bar_date", "cash", "spy_shares", "spy_close", "sma_200", "regime_risk_on", "decision",
+    "pending_action", "equity", "daily_return", "cumulative_return", "peak_equity", "drawdown", "details",
+)
+
+
+def save_benchmark_snapshot(benchmark: str, run_date: str, row: Dict[str, Any]) -> None:
+    """Upsert one shadow-benchmark day. Separate table from the V1 portfolio."""
+    if not _db_available:
+        return
+    _assert_safe_write_target()
+    with Session(get_engine()) as session:
+        existing = session.execute(
+            select(BenchmarkSnapshotRow).where(BenchmarkSnapshotRow.benchmark == benchmark,
+                                               BenchmarkSnapshotRow.run_date == run_date)
+        ).scalar_one_or_none()
+        values = {k: row.get(k) for k in _BENCHMARK_COLUMNS}
+        if existing is None:
+            session.add(BenchmarkSnapshotRow(benchmark=benchmark, run_date=run_date, **values))
+        else:
+            for k, v in values.items():
+                setattr(existing, k, v)
+        session.commit()
+
+
+def get_benchmark_snapshots(benchmark: str, limit: int = 5000) -> List[Dict[str, Any]]:
+    """Chronological shadow-benchmark history."""
+    if not _db_available:
+        return []
+    with Session(get_engine()) as session:
+        rows = session.execute(
+            select(BenchmarkSnapshotRow).where(BenchmarkSnapshotRow.benchmark == benchmark)
+            .order_by(BenchmarkSnapshotRow.run_date.asc()).limit(limit)
+        ).scalars().all()
+        return [{"benchmark": r.benchmark, "run_date": r.run_date, **{k: getattr(r, k) for k in _BENCHMARK_COLUMNS}}
+                for r in rows]
 
 
 def get_portfolio_snapshots(limit: int = 500, market: str = "US") -> List[Dict[str, Any]]:

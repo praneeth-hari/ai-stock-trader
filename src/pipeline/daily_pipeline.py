@@ -296,6 +296,13 @@ def run_daily_pipeline(
         _pipeline_lock.release()
 
 
+def _active_model_sha256() -> str:
+    import hashlib
+
+    path = Path(settings.data_models_dir) / "active_model.joblib"
+    return hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else "unavailable"
+
+
 def _resolve_market(market_name: Optional[str], tickers: Optional[List[str]]) -> str:
     if market_name:
         return str(market_name).strip().upper()
@@ -980,6 +987,36 @@ def _run_daily_pipeline_internal(
     # ── 9. End-of-Day Snapshot ────────────────────────────────────────────────
     total_equity = broker.record_snapshot(run_date=run_date, current_prices=current_prices)
 
+    # ── 9a. Observability (measurement only) ───────────────────────────────────
+    # Runs after the day is committed and only reads final results; a failure here is logged and
+    # never changes the run's status, orders or exit code.
+    observability: Dict[str, Any] = {}
+    try:
+        from src.reports.decision_log import build_decision_records
+        records = build_decision_records(
+            ranking_result=ranking_result, risk_result=risk_result, orders=new_pending_orders,
+            held_tickers=current_positions.keys(), macro_result=macro_result,
+            intelligence=intelligence, model_sha256=_active_model_sha256(),
+        )
+        observability["decision_rows"] = repository.save_decision_log(run_date, market_name, records)
+    except Exception as exc:
+        observability["decision_log_error"] = str(exc)
+        logger.warning("OBSERVABILITY: decision log not written for %s: %s", run_date, exc)
+        repository.log_event("WARNING", market_comp, f"OBSERVABILITY: decision log not written: {exc}",
+                             {"run_date": run_date})
+    if market_name == "US":
+        try:
+            from src.trading.shadow_benchmark import update_spy_200d_benchmark
+            bench = update_spy_200d_benchmark(run_date, spy_clean, market=market_name)
+            if bench:
+                observability["benchmark_spy_200d"] = {
+                    k: bench.get(k) for k in ("equity", "decision", "regime_risk_on", "drawdown")}
+        except Exception as exc:
+            observability["benchmark_error"] = str(exc)
+            logger.warning("OBSERVABILITY: SPY 200d benchmark not updated for %s: %s", run_date, exc)
+            repository.log_event("WARNING", market_comp, f"OBSERVABILITY: SPY 200d benchmark not updated: {exc}",
+                                 {"run_date": run_date})
+
     # ── 9c. Section 10 Item 1: Paper Trading Leaderboard ───────────────────────
     try:
         if getattr(settings, "leaderboard_enabled", True):
@@ -1021,6 +1058,7 @@ def _run_daily_pipeline_internal(
             "total_slippage_cost": broker.total_slippage_cost,
             "errors": errors,
             "intelligence": intelligence,
+            "observability": observability,
         },
     )
 
