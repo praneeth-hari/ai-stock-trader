@@ -1,13 +1,17 @@
 name: Daily Trading Pipeline
 
+# DISABLED for the V1 local-only forward-paper period (see V1_FREEZE_REPORT.md).
+# This machine's Task Scheduler task "AI-Stock-Trader-Daily" is the single trading runner.
+# CI has no frozen model and trades a separate remote database, so it must not run.
+# Former schedule, restore only when V1 is deliberately moved to CI:
+#   - cron: '30 20 * * 1-5'   # 2:00 AM IST, US markets
+#   - cron: '30 10 * * 1-5'   # 4:00 PM IST, Indian markets
 on:
-  schedule:
-    # 2:00 AM IST = 8:30 PM UTC previous day
-    - cron: '30 20 * * 1-5'
-  workflow_dispatch:  # Manual trigger too
+  workflow_dispatch:
 
 jobs:
   trade:
+    if: ${{ false }}  # hard off: even a manual dispatch cannot run the trading pipeline
     runs-on: ubuntu-latest
     env:
       PYTHONUNBUFFERED: "1"

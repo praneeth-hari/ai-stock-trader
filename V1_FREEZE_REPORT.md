@@ -89,14 +89,20 @@ Note: CLAUDE.md lists the signal exit as a flat 0.45. The code uses the volatili
   - TSLA's share of trades and of P&L.
 - **Verdict at 12 months, not earlier:** if the strategy doesn't beat SPY ≥ 200-day timing on both Sharpe and max drawdown, conclude the ML layer adds no value in V1. Twelve months is still a small sample, so treat any result with caution.
 
-## 5. Where it runs (decision needed)
+## 5. Where it runs: this machine only
 
-GitHub Actions checks out the repo on a fresh machine, and the model file is gitignored. Before the freeze, every CI run therefore trained and promoted a **new** model, so CI trading never used this model. With the freeze on, CI runs will fail loudly (Telegram failure alert) instead.
+**Decision (2026-09-26):** this machine's Task Scheduler is the single V1 trading runner. The model file is not added to Git.
 
-Choose one before pushing:
+| Automated path | Trades? | Forward-paper period |
+| --- | --- | --- |
+| Task `AI-Stock-Trader-Daily` → `run_trader.bat` → scheduler → pipeline (Mon–Fri 2:00 AM IST) | Yes, local SQLite portfolio | **Enabled**: the only trading path |
+| Task `AI-Stock-Trader-Monthly-Retrain` → `python -m src.ml.retrain --force` | No | Enabled; candidates are saved but never promoted (freeze plus approval gate) |
+| Tasks `DailyStatus`, `Morning-HealthCheck`, `Weekly-Summary` | No | Enabled (reporting only) |
+| GitHub `daily_trading.yml` (remote database, unfrozen model) | Yes | **Disabled**: no schedule, and the job is hard-off even when started manually |
+| GitHub `monthly_retrain.yml`, `weekly_summary.yml` (remote database) | No | Schedules paused; manual runs still possible |
 
-- run V1 forward trading only on the local machine (Task Scheduler), where the frozen model file exists; or
-- make the frozen model file available to CI, for example by committing it, which requires an exception to the `data/models/` gitignore rule.
+- **Same-day duplicates:** `run_daily_pipeline` skips a second run for the same market and date. The scheduler's `--force` only bypasses weekend/holiday/market-hours checks, not this guard. The dashboard's manual "run cycle" button also goes through the guard.
+- **GitHub workflow changes take effect only after they are pushed.** Until then, GitHub keeps running the old schedules from `origin/main`.
 
 ## 6. What the V1 commit contains
 

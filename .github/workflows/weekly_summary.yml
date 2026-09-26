@@ -1,9 +1,10 @@
 name: Weekly Summary
 
+# Schedule paused for the V1 local-only forward-paper period (see V1_FREEZE_REPORT.md).
+# It reports on the remote database, not the local V1 portfolio; the local task
+# "AI-Stock-Trader-Weekly-Summary" sends the V1 weekly summary.
+# Former schedule: - cron: '30 3 * * 0'   # Sunday 9:00 AM IST
 on:
-  schedule:
-    # Sunday 9:00 AM IST = Sunday 3:30 AM UTC
-    - cron: '30 3 * * 0'
   workflow_dispatch:
 
 jobs:

@@ -1,9 +1,10 @@
 name: Monthly Model Retrain
 
+# Schedule paused for the V1 local-only forward-paper period (see V1_FREEZE_REPORT.md).
+# The local task "AI-Stock-Trader-Monthly-Retrain" still generates approval-gated candidates;
+# CI has no active model and uses a remote database V1 no longer trades.
+# Former schedule: - cron: '30 4 1-7 * 6'   # first Saturday 10:00 AM IST
 on:
-  schedule:
-    # First Saturday 10:00 AM IST = 4:30 AM UTC
-    - cron: '30 4 1-7 * 6'
   workflow_dispatch:
 
 jobs:
