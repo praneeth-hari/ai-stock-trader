@@ -3,6 +3,7 @@
 *.db
 data/fundamentals/
 data/raw/
+data/reports/
 data/processed/
 data/models/
 data/pending_orders_*.json

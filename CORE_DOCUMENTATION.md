@@ -155,10 +155,7 @@ for f in (Path('data/raw') / '2026-09-12').glob('*.csv'):
 2026-09-12 20:00:20,607 [WARNING] src.data.market_data: UNVALIDATED UNIVERSE DATA: 18 total rows across 3 tickers. Must pass Phase 2 validation gate before strategy use.
 
       date       open       high        low      close   volume ticker
-2024-01-02 187.149994 188.440002 183.889999 185.639999 82488700   AAPL
-2024-01-03 184.220001 185.880005 183.429993 184.250000 58414500   AAPL
-2024-01-04 182.149994 183.089996 180.880005 181.910004 71983600   AAPL
-2024-01-05 181.990005 182.759995 180.169998 181.179993 62379700   AAPL
+(sample Yahoo Finance data rows omitted)
 
 ticker
 AAPL    6
