@@ -291,18 +291,3 @@ def test_ranking_imports_performance_weights():
 def test_smart_labels_active_by_default():
     from config.settings import settings
     assert settings.use_smart_labels is True
-
-
-# ── India Ranking Tests ───────────────────────────────────────────────────────────
-
-def test_rank_india_stocks_returns_list():
-    from src.ranking.ranking import rank_india_stocks
-    result = rank_india_stocks({})
-    assert isinstance(result, list)
-
-
-def test_rank_india_stocks_empty_data():
-    from src.ranking.ranking import rank_india_stocks
-    import pandas as pd
-    result = rank_india_stocks({"RELIANCE.NS": pd.DataFrame()})
-    assert isinstance(result, list)

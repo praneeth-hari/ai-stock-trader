@@ -230,21 +230,6 @@ if "dashboard_loaded" not in st.session_state:
     st.session_state["dashboard_loaded"] = True
 
 
-@st.cache_data(ttl=3600)  # cache for 1 hour to avoid hitting yfinance too often
-def get_live_usd_inr_rate() -> float:
-    try:
-        import yfinance as yf
-        # INR=X is the Yahoo Finance ticker for USD to INR exchange rate
-        ticker = yf.Ticker("INR=X")
-        # Use fast_info if available, fallback to history
-        if hasattr(ticker, "fast_info") and "lastPrice" in ticker.fast_info:
-            return float(ticker.fast_info["lastPrice"])
-        else:
-            return float(ticker.history(period="1d")["Close"].iloc[-1])
-    except Exception:
-        return 83.50  # Fallback to a sane default if offline
-
-
 # ── Sidebar: System Info & Trigger Controls ────────────────────────────────────
 
 with st.sidebar:
@@ -254,27 +239,12 @@ with st.sidebar:
     # Safety Notice
     st.info("🛡️ **V1 Security Guarantee**: Paper trading only. No real money or live broker connections exist.")
 
-    st.markdown("---")
-    st.subheader("🌐 Active Market View & Currency")
-    if "selected_market" not in st.session_state:
-        st.session_state["selected_market"] = "US"
-
-    selected_market_label = st.radio(
-        "Select Market View:",
-        ["🇺🇸 US Market ($ USD)", "🇮🇳 Indian Market (₹ INR)"],
-        index=0 if st.session_state.get("selected_market") == "US" else 1,
-        help="Switch between US Market ($ USD) and Indian Market (₹ INR) views. All metrics, position tables, predictions, and trades adapt to your selection."
-    )
-    is_india = ("Indian" in selected_market_label or "INR" in selected_market_label)
-    st.session_state["selected_market"] = "INDIA" if is_india else "US"
-
-    curr_sym = "₹" if is_india else "$"
-    live_fx = get_live_usd_inr_rate() if is_india else 1.0
-    fx_rate = live_fx
+    st.session_state["selected_market"] = "US"
+    curr_sym = "$"
 
     st.markdown("---")
     st.subheader("System Configuration")
-    locked_cap = settings.get_initial_capital(st.session_state["selected_market"]) * (live_fx if (is_india and settings.india_initial_capital == settings.initial_capital) else 1.0)
+    locked_cap = settings.get_initial_capital("US")
     st.markdown(f"**Locked Capital**: `{curr_sym}{locked_cap:,.2f}`")
     st.markdown(f"**Max Positions**: `{settings.max_positions}`")
     st.markdown(f"**Cash Reserve Floor**: `{settings.cash_reserve * 100:.1f}%`")
@@ -286,28 +256,15 @@ with st.sidebar:
     st.markdown("---")
     st.subheader("Manual Triggers")
 
-    col_btn1, col_btn2 = st.columns(2)
-    with col_btn1:
-        if st.button("▶ Run US Cycle", use_container_width=True, help="Executes US paper trading pipeline"):
-            with st.spinner("Executing US daily paper trading pipeline..."):
-                try:
-                    res = run_daily_paper_cycle_trigger(market="US")
-                    st.success(f"US cycle completed for {res['run_date']}! Fills: {res['fills_count']}, Orders: {res['orders_count']}")
-                    st.session_state["latest_audit_md"] = res["audit_markdown"]
-                    st.rerun()
-                except Exception as exc:
-                    st.error(f"Pipeline error: {exc}")
-
-    with col_btn2:
-        if st.button("▶ Run India Cycle", use_container_width=True, help="Executes Indian NSE paper trading pipeline"):
-            with st.spinner("Executing Indian NSE paper trading pipeline..."):
-                try:
-                    res_in = run_daily_paper_cycle_trigger(market="INDIA")
-                    st.success(f"India cycle completed! Fills: {res_in['fills_count']}, Orders: {res_in['orders_count']}")
-                    st.session_state["latest_audit_md"] = res_in["audit_markdown"]
-                    st.rerun()
-                except Exception as exc:
-                    st.error(f"India pipeline error: {exc}")
+    if st.button("▶ Run US Cycle", use_container_width=True, help="Executes US paper trading pipeline"):
+        with st.spinner("Executing US daily paper trading pipeline..."):
+            try:
+                res = run_daily_paper_cycle_trigger(market="US")
+                st.success(f"US cycle completed for {res['run_date']}! Fills: {res['fills_count']}, Orders: {res['orders_count']}")
+                st.session_state["latest_audit_md"] = res["audit_markdown"]
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Pipeline error: {exc}")
 
     if st.button("📊 Run Backtest Replay", use_container_width=True, help="Runs historical backtest against SPY"):
         with st.spinner("Running 2021-2024 backtest vs SPY benchmark..."):
@@ -331,28 +288,23 @@ with st.sidebar:
 
 # ── Currency & Display Helpers ──────────────────────────────────────────────────
 
-def fmt_c(val: float | int | None, is_native_inr: bool = False) -> str:
+def fmt_c(val: float | int | None) -> str:
     if val is None or str(val) == "nan":
         return "N/A"
     try:
-        v = float(val) if (is_native_inr or not is_india) else float(val) * fx_rate
-        return f"₹{v:,.2f}" if is_india else f"${v:,.2f}"
+        return f"${float(val):,.2f}"
     except Exception:
         return str(val)
 
-def fmt_c_delta(val: float | int | None, is_native_inr: bool = False) -> str:
+def fmt_c_delta(val: float | int | None) -> str:
     if val is None or str(val) == "nan":
         return "N/A"
     try:
-        v = float(val) if (is_native_inr or not is_india) else float(val) * fx_rate
+        v = float(val)
         pref = "+" if v > 0 else ""
-        return f"₹{pref}{v:,.2f}" if is_india else f"${pref}{v:,.2f}"
+        return f"${pref}{v:,.2f}"
     except Exception:
         return str(val)
-
-def is_indian_ticker(t: str) -> bool:
-    st_t = str(t).strip().upper()
-    return st_t.endswith(".NS") or st_t.endswith(".BO") or st_t in ("^NSEI", "^BSESN", "^INDIAVIX")
 
 
 # ── Main Dashboard Header & Market Banner ──────────────────────────────────────
@@ -360,30 +312,17 @@ def is_indian_ticker(t: str) -> bool:
 st.title("📈 AI Stock Trader — Operator Monitoring Dashboard")
 st.markdown("Automated algorithmic trading system running daily paper cycles with strict capital preservation rules.")
 
-if is_india:
-    st.markdown(f"""
-    <div style="background: rgba(255, 152, 0, 0.15); border: 1px solid #ff9800; border-radius: 8px; padding: 12px 18px; margin-bottom: 20px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px;">
-        <div>
-            <span style="font-weight: 700; color: #ff9800; font-size: 16px;">🇮🇳 INDIAN MARKET VIEW ACTIVE (NSE)</span>
-            <div style="font-size: 13px; color: #bbb; margin-top: 4px;">Tracking 25 NSE Tickers (.NS) | Benchmark: Nifty 50 (^NSEI)</div>
-        </div>
-        <span style="font-size: 14px; color: #e0e0e0; background: #1e222d; padding: 6px 14px; border-radius: 6px; border: 1px solid #2a2e39;">
-            Display Currency: <b style="color:#ff9800;">₹ INR</b> &nbsp;•&nbsp; FX Rate: <b>1 USD = ₹{live_fx:.2f} INR</b>
-        </span>
+st.markdown("""
+<div style="background: rgba(38, 166, 154, 0.15); border: 1px solid #26a69a; border-radius: 8px; padding: 12px 18px; margin-bottom: 20px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px;">
+    <div>
+        <span style="font-weight: 700; color: #26a69a; font-size: 16px;">🇺🇸 US MARKET VIEW ACTIVE (NYSE/NASDAQ)</span>
+        <div style="font-size: 13px; color: #bbb; margin-top: 4px;">Tracking 25 US Tickers | Benchmark: S&P 500 (SPY)</div>
     </div>
-    """, unsafe_allow_html=True)
-else:
-    st.markdown("""
-    <div style="background: rgba(38, 166, 154, 0.15); border: 1px solid #26a69a; border-radius: 8px; padding: 12px 18px; margin-bottom: 20px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px;">
-        <div>
-            <span style="font-weight: 700; color: #26a69a; font-size: 16px;">🇺🇸 US MARKET VIEW ACTIVE (NYSE/NASDAQ)</span>
-            <div style="font-size: 13px; color: #bbb; margin-top: 4px;">Tracking 25 US Tickers | Benchmark: S&P 500 (SPY)</div>
-        </div>
-        <span style="font-size: 14px; color: #e0e0e0; background: #1e222d; padding: 6px 14px; border-radius: 6px; border: 1px solid #2a2e39;">
-            Display Currency: <b style="color:#26a69a;">$ USD</b> &nbsp;•&nbsp; Benchmark: <b>SPY</b>
-        </span>
-    </div>
-    """, unsafe_allow_html=True)
+    <span style="font-size: 14px; color: #e0e0e0; background: #1e222d; padding: 6px 14px; border-radius: 6px; border: 1px solid #2a2e39;">
+        Display Currency: <b style="color:#26a69a;">$ USD</b> &nbsp;•&nbsp; Benchmark: <b>SPY</b>
+    </span>
+</div>
+""", unsafe_allow_html=True)
 
 # Pull live data
 try:
@@ -421,7 +360,7 @@ events_df = get_system_events_df(limit=100)
 
 # Filter open positions by active market
 all_positions = port.get("positions", [])
-market_positions = [p for p in all_positions if is_indian_ticker(p.get("ticker", ""))] if is_india else [p for p in all_positions if not is_indian_ticker(p.get("ticker", ""))]
+market_positions = all_positions
 open_pos_count = len(market_positions)
 pnl_raw = sum(p.get("unrealized_pnl", 0.0) for p in market_positions) if market_positions else port.get('unrealized_pnl_total', 0.0)
 
@@ -434,7 +373,7 @@ with m1:
     if pulse_cls:
         st.markdown(f'<div class="{pulse_cls}" style="border-radius:8px; padding:2px;">', unsafe_allow_html=True)
     st.metric(
-        f"Portfolio Value ({'₹ INR' if is_india else '$ USD'})",
+        "Portfolio Value ($ USD)",
         fmt_c(port['total_equity']),
         delta=f"{fmt_c_delta(pnl_raw)} Today's Change",
         help="Combined portfolio equity (positions value + cash reserve).",
@@ -443,16 +382,16 @@ with m1:
         st.markdown('</div>', unsafe_allow_html=True)
 with m2:
     st.metric(
-        f"Cash ({'₹ INR' if is_india else '$ USD'})",
+        "Cash ($ USD)",
         fmt_c(port['cash']),
         help="Uninvested cash available.",
     )
 with m3:
     pos_text = "None" if open_pos_count == 0 else f"{open_pos_count} Active"
     st.metric(
-        f"Active Positions ({'NSE' if is_india else 'US'})",
+        "Active Positions (US)",
         pos_text,
-        help=f"Active open stock holdings in {'Indian (NSE)' if is_india else 'US'} market.",
+        help="Active open stock holdings in US market.",
     )
 with m4:
     status_label = "System Running ✅"
@@ -489,10 +428,10 @@ with tab1:
     st.code(f"🧬 {get_strategy_dna()}", language=None)
 
     # US Stocks being tracked
-    market_name_display = "NSE" if is_india else "US"
+    market_name_display = "US"
     with st.expander(f"📋 View all 25 {market_name_display} stocks being tracked"):
         from config.settings import settings as _cfg_dynamic
-        ticker_list = list(_cfg_dynamic.india_tickers if is_india else _cfg_dynamic.ticker_list)
+        ticker_list = list(_cfg_dynamic.ticker_list)
         us_cols = st.columns(5)
         for i, ticker in enumerate(ticker_list):
             us_cols[i % 5].write(f"• {ticker}")
@@ -829,7 +768,7 @@ with tab2:
         open_pos_df = pd.DataFrame(port["positions"])
         base_open_cols = ["ticker", "shares", "entry_price", "current_price", "market_value", "unrealized_pnl", "unrealized_pnl_pct", "size_tier"]
         avail_cols = [c for c in base_open_cols if c in open_pos_df.columns]
-        currency_sym = "₹" if is_india else "$"
+        currency_sym = "$"
         open_rename = {
             "ticker": "Ticker",
             "shares": "Shares Held",
@@ -1306,7 +1245,7 @@ with tab_perf:
     with col_d2:
         st.markdown("#### Allocation Summary")
         if not donut_df.empty:
-            currency_sym = "₹" if is_india else "$"
+            currency_sym = "$"
             st.dataframe(
                 donut_df.rename(columns={"sector": "Component", "value": f"Value ({currency_sym})", "pct": "Weight (%)"}).style.format({
                     f"Value ({currency_sym})": currency_sym + "{:,.2f}",

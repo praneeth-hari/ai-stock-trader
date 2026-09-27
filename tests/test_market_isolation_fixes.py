@@ -1,15 +1,17 @@
 """
-tests/test_market_isolation_fixes.py — Focused tests for 4 targeted market-isolation cleanup areas.
+tests/test_market_isolation_fixes.py — V1 is US-only: market context resolves to US and
+any other market is rejected loudly.
 """
 
 from datetime import date
-import pandas as pd
 import pytest
 
-from config.settings import get_ticker_sector, settings
+from config.settings import settings
 from src.chatbot.gemini_chat import build_live_context_strings
 from src.db import repository
+from src.pipeline.daily_pipeline import _resolve_market
 from src.reports.weekly_summary import generate_weekly_summary_data
+from src.trading.paper_broker import PaperBroker
 
 
 @pytest.fixture(autouse=True)
@@ -27,86 +29,59 @@ def isolated_db(tmp_path):
     repository._engine = None
 
 
-def test_orders_and_trades_explicit_market_isolation():
-    """Verify that orders and trades with explicit market context do not bleed across markets."""
-    repository.create_all_tables()
+def test_orders_and_trades_us_market_filter():
+    """Orders and trades saved for the US market are returned by the US market filter."""
+    o_us_id = repository.save_order("2026-09-25", "AAPL", "BUY", 10.0, 100.0, "US test order", market="US")
+    t_us_id = repository.save_trade("2026-09-25", "AAPL", "BUY", 10.0, 100.0, 0.2, 0.0, market="US")
 
-    # Save orders with explicit market context
-    o_us_id = repository.save_order("2026-09-25", "TEST_US", "BUY", 10.0, 100.0, "US test order", market="US")
-    o_in_id = repository.save_order("2026-09-25", "TEST_IN", "BUY", 10.0, 100.0, "India test order", market="INDIA")
-
-    # Save trades with explicit market context
-    t_us_id = repository.save_trade("2026-09-25", "TEST_US", "BUY", 10.0, 100.0, 0.2, 0.0, market="US")
-    t_in_id = repository.save_trade("2026-09-25", "TEST_IN", "BUY", 10.0, 100.0, 0.2, 0.0, market="INDIA")
-
-    us_orders = repository.get_orders(market="US")
-    india_orders = repository.get_orders(market="INDIA")
-
-    us_order_ids = [o["id"] for o in us_orders]
-    india_order_ids = [o["id"] for o in india_orders]
-
-    assert o_us_id in us_order_ids
-    assert o_us_id not in india_order_ids
-    assert o_in_id in india_order_ids
-    assert o_in_id not in us_order_ids
-
-    us_trades = repository.get_trades(market="US")
-    india_trades = repository.get_trades(market="INDIA")
-
-    us_trade_ids = [t["id"] for t in us_trades]
-    india_trade_ids = [t["id"] for t in india_trades]
-
-    assert t_us_id in us_trade_ids
-    assert t_us_id not in india_trade_ids
-    assert t_in_id in india_trade_ids
-    assert t_in_id not in us_trade_ids
+    assert o_us_id in [o["id"] for o in repository.get_orders(market="US")]
+    assert t_us_id in [t["id"] for t in repository.get_trades(market="US")]
 
 
-def test_weekly_summary_dynamic_benchmark():
-    """Verify weekly summary fetches benchmark dynamically using settings.get_benchmark(market)."""
-    # Seed mock snapshot for US and INDIA so weekly summary runs
+def test_weekly_summary_uses_spy_benchmark():
     repository.save_portfolio_snapshot("2026-09-25", 10000.0, 10000.0, {}, market="US")
-    repository.save_portfolio_snapshot("2026-09-25", 10000.0, 10000.0, {}, market="INDIA")
-
     us_data = generate_weekly_summary_data(target_date=date(2026, 9, 25), market="US")
-    india_data = generate_weekly_summary_data(target_date=date(2026, 9, 25), market="INDIA")
 
     assert us_data is not None
-    assert india_data is not None
-
-    assert us_data["benchmark"] == settings.get_benchmark("US")  # SPY
-    assert india_data["benchmark"] == settings.get_benchmark("INDIA")  # ^NSEI
+    assert us_data["benchmark"] == settings.get_benchmark("US") == "SPY"
 
 
-def test_chatbot_context_market_currency_symbols():
-    """Verify chatbot live context uses market-appropriate currency symbols ($ vs ₹)."""
+def test_chatbot_context_uses_dollar_symbol():
     us_ctx = build_live_context_strings(market="US")
-    india_ctx = build_live_context_strings(market="INDIA")
-
     assert "$" in us_ctx["portfolio_data"]
-    assert "₹" in india_ctx["portfolio_data"]
 
 
-def test_indian_sector_mappings():
-    """Verify Indian NSE tickers receive specific assigned sectors rather than 'Other'."""
-    assert get_ticker_sector("RELIANCE.NS") == "Energy"
-    assert get_ticker_sector("TCS.NS") == "Technology"
-    assert get_ticker_sector("HDFCBANK.NS") == "Financials"
-    assert get_ticker_sector("INFY.NS") == "Technology"
-    assert get_ticker_sector("ICICIBANK.NS") == "Financials"
-    assert get_ticker_sector("HINDUNILVR.NS") == "Consumer Staples"
-    assert get_ticker_sector("SUNPHARMA.NS") == "Healthcare"
-    assert get_ticker_sector("LT.NS") == "Industrials"
-    assert get_ticker_sector("MARUTI.NS") == "Consumer Cyclical"
-    assert get_ticker_sector("BHARTIARTL.NS") == "Communications"
+def test_market_helpers_return_us_values():
+    assert settings.get_universe("US") == settings.ticker_list
+    assert settings.get_benchmark("US") == "SPY"
+    assert settings.get_initial_capital("US") == float(settings.initial_capital)
+    assert settings.get_currency_symbol("US") == "$"
+    assert settings.get_benchmark(" us ") == "SPY"
 
 
-def test_legacy_orders_trades_migration_classification():
-    """Verify legacy records (where market column was absent or NULL) are classified by ticker suffix."""
+@pytest.mark.parametrize("helper", ["get_universe", "get_benchmark", "get_initial_capital", "get_currency_symbol"])
+def test_market_helpers_reject_non_us_market(helper):
+    with pytest.raises(ValueError, match="US market only"):
+        getattr(settings, helper)("INDIA")
+
+
+def test_pipeline_market_resolution_is_us_only():
+    assert _resolve_market(None, None) == "US"
+    assert _resolve_market("us", ["AAPL"]) == "US"
+    with pytest.raises(ValueError, match="US market only"):
+        _resolve_market("INDIA", None)
+
+
+def test_paper_broker_rejects_non_us_market():
+    with pytest.raises(ValueError, match="US market only"):
+        PaperBroker(market="INDIA")
+
+
+def test_legacy_orders_trades_migration_tags_us():
+    """Legacy records without a market column are tagged US by the schema migration."""
     from sqlalchemy import text
     engine = repository.get_engine()
 
-    # Simulate legacy table creation without 'market' column
     with engine.connect() as conn:
         conn.execute(text("DROP TABLE IF EXISTS orders"))
         conn.execute(text("DROP TABLE IF EXISTS trades"))
@@ -136,33 +111,13 @@ def test_legacy_orders_trades_migration_classification():
                 created_at DATETIME
             )
         """))
-        # Insert legacy records without explicit market
-        conn.execute(text("INSERT INTO orders (run_date, ticker, action, quantity, price, reason) VALUES ('2026-01-01', 'RELIANCE.NS', 'BUY', 10, 2500, 'Legacy India order')"))
         conn.execute(text("INSERT INTO orders (run_date, ticker, action, quantity, price, reason) VALUES ('2026-01-01', 'AAPL', 'BUY', 5, 180, 'Legacy US order')"))
-        conn.execute(text("INSERT INTO trades (run_date, ticker, action, quantity, fill_price, slippage_cost, net_pnl) VALUES ('2026-01-01', 'RELIANCE.NS', 'BUY', 10, 2500, 5, 0)"))
         conn.execute(text("INSERT INTO trades (run_date, ticker, action, quantity, fill_price, slippage_cost, net_pnl) VALUES ('2026-01-01', 'AAPL', 'BUY', 5, 180, 1, 0)"))
         conn.commit()
 
-    # Execute schema migration
     repository.create_all_tables()
 
-    # Query with explicit market filters
-    india_orders = repository.get_orders(market="INDIA")
     us_orders = repository.get_orders(market="US")
-    india_trades = repository.get_trades(market="INDIA")
     us_trades = repository.get_trades(market="US")
-
-    india_order_tickers = [o["ticker"] for o in india_orders]
-    us_order_tickers = [o["ticker"] for o in us_orders]
-    india_trade_tickers = [t["ticker"] for t in india_trades]
-    us_trade_tickers = [t["ticker"] for t in us_trades]
-
-    assert "RELIANCE.NS" in india_order_tickers
-    assert "RELIANCE.NS" not in us_order_tickers
-    assert "AAPL" in us_order_tickers
-    assert "AAPL" not in india_order_tickers
-
-    assert "RELIANCE.NS" in india_trade_tickers
-    assert "RELIANCE.NS" not in us_trade_tickers
-    assert "AAPL" in us_trade_tickers
-    assert "AAPL" not in india_trade_tickers
+    assert [(o["ticker"], o["market"]) for o in us_orders] == [("AAPL", "US")]
+    assert [(t["ticker"], t.get("market", "US")) for t in us_trades] == [("AAPL", "US")]

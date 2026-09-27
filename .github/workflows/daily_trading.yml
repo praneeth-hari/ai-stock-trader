@@ -5,7 +5,6 @@ name: Daily Trading Pipeline
 # CI has no frozen model and trades a separate remote database, so it must not run.
 # Former schedule, restore only when V1 is deliberately moved to CI:
 #   - cron: '30 20 * * 1-5'   # 2:00 AM IST, US markets
-#   - cron: '30 10 * * 1-5'   # 4:00 PM IST, Indian markets
 on:
   workflow_dispatch:
 

@@ -292,7 +292,3 @@ def test_strategy_dna_returns_string():
 def test_cash_reserve_enforced():
     from config.settings import settings
     assert settings.cash_reserve >= 0.15
-
-def test_india_pipeline_hour_ist():
-    from config.settings import settings
-    assert settings.india_pipeline_hour_ist == 16

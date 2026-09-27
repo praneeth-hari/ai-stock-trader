@@ -279,8 +279,7 @@ def create_all_tables() -> None:
                     conn.execute(text("ALTER TABLE orders ADD COLUMN market VARCHAR(10)"))
                     conn.commit()
                     logger.info("Migrated schema: added orders.market")
-                conn.execute(text("UPDATE orders SET market = 'INDIA' WHERE (market IS NULL OR market = 'US') AND (ticker LIKE '%.NS%' OR ticker LIKE '%.BO%')"))
-                conn.execute(text("UPDATE orders SET market = 'US' WHERE market IS NULL AND NOT (ticker LIKE '%.NS%' OR ticker LIKE '%.BO%')"))
+                conn.execute(text("UPDATE orders SET market = 'US' WHERE market IS NULL"))
                 conn.commit()
 
             if "trades" in table_names:
@@ -293,8 +292,7 @@ def create_all_tables() -> None:
                     conn.execute(text("ALTER TABLE trades ADD COLUMN slippage_cost FLOAT DEFAULT 0.0"))
                     conn.commit()
                     logger.info("Migrated schema: added trades.slippage_cost")
-                conn.execute(text("UPDATE trades SET market = 'INDIA' WHERE (market IS NULL OR market = 'US') AND (ticker LIKE '%.NS%' OR ticker LIKE '%.BO%')"))
-                conn.execute(text("UPDATE trades SET market = 'US' WHERE market IS NULL AND NOT (ticker LIKE '%.NS%' OR ticker LIKE '%.BO%')"))
+                conn.execute(text("UPDATE trades SET market = 'US' WHERE market IS NULL"))
                 conn.commit()
 
         logger.info("All database tables created/verified.")
@@ -585,7 +583,7 @@ def save_portfolio_snapshot(
     market: str = "US",
     pending_orders: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
-    """Upsert a portfolio snapshot tagged by market ('US' or 'INDIA'). Silently skips in stateless mode.
+    """Upsert a portfolio snapshot tagged by market ('US'). Silently skips in stateless mode.
     pending_orders (when given) is committed in the same row as cash/positions; None leaves it unset."""
     if not _db_available:
         return
@@ -648,7 +646,7 @@ def get_portfolio_snapshot(run_date: str, market: str = "US") -> Optional[Dict[s
 
 
 def get_latest_portfolio_snapshot(market: str = "US") -> Optional[Dict[str, Any]]:
-    """Returns the most recent portfolio snapshot for the given market ('US' or 'INDIA')."""
+    """Returns the most recent portfolio snapshot for the given market ('US')."""
     if not _db_available:
         return None
     market_clean = str(market).strip().upper()
@@ -885,31 +883,12 @@ def get_orders(run_date: Optional[str] = None, limit: int = 100, market: Optiona
     """Returns orders for a given run date and market context. Returns empty list in stateless mode."""
     if not _db_available:
         return []
-    from sqlalchemy import and_, or_
+    from sqlalchemy import or_
     with Session(get_engine()) as session:
         stmt = select(OrderRow)
         if market:
             market_clean = str(market).strip().upper()
-            if market_clean == "INDIA":
-                stmt = stmt.where(
-                    or_(
-                        OrderRow.market == "INDIA",
-                        and_(
-                            OrderRow.market.is_(None),
-                            OrderRow.ticker.like("%.NS%")
-                        )
-                    )
-                )
-            else:
-                stmt = stmt.where(
-                    or_(
-                        OrderRow.market == market_clean,
-                        and_(
-                            OrderRow.market.is_(None),
-                            ~OrderRow.ticker.like("%.NS%")
-                        )
-                    )
-                )
+            stmt = stmt.where(or_(OrderRow.market == market_clean, OrderRow.market.is_(None)))
         if run_date is not None:
             stmt = stmt.where(OrderRow.run_date == run_date).order_by(OrderRow.id)
         else:
@@ -968,31 +947,12 @@ def get_trades(run_date: Optional[str] = None, limit: int = 100, market: Optiona
     """Returns trades for a given run date and market context. Returns empty list in stateless mode."""
     if not _db_available:
         return []
-    from sqlalchemy import and_, or_
+    from sqlalchemy import or_
     with Session(get_engine()) as session:
         stmt = select(TradeRow)
         if market:
             market_clean = str(market).strip().upper()
-            if market_clean == "INDIA":
-                stmt = stmt.where(
-                    or_(
-                        TradeRow.market == "INDIA",
-                        and_(
-                            TradeRow.market.is_(None),
-                            TradeRow.ticker.like("%.NS%")
-                        )
-                    )
-                )
-            else:
-                stmt = stmt.where(
-                    or_(
-                        TradeRow.market == market_clean,
-                        and_(
-                            TradeRow.market.is_(None),
-                            ~TradeRow.ticker.like("%.NS%")
-                        )
-                    )
-                )
+            stmt = stmt.where(or_(TradeRow.market == market_clean, TradeRow.market.is_(None)))
         if run_date is not None:
             stmt = stmt.where(TradeRow.run_date == run_date).order_by(TradeRow.id)
         else:
@@ -1711,48 +1671,3 @@ def get_walk_forward_history(model_type: Optional[str] = None) -> pd.DataFrame:
         "brier_score": r.brier_score,
         "n_samples": r.n_samples,
     } for r in rows])
-
-
-def save_india_portfolio(cash: float, positions: dict) -> None:
-    """Saves Indian portfolio state to DB as an event log entry."""
-    if not _db_available:
-        return
-    _assert_safe_write_target()
-    try:
-        import json
-        with Session(get_engine()) as session:
-            existing = session.query(EventLog).filter(
-                EventLog.component == "INDIA_PORTFOLIO"
-            ).first()
-            data = json.dumps({"cash": cash, "positions": positions})
-            if existing:
-                existing.message = data
-                existing.occurred_at = _utcnow()
-            else:
-                session.add(EventLog(
-                    component="INDIA_PORTFOLIO",
-                    message=data,
-                    level="INFO",
-                ))
-            session.commit()
-    except Exception as exc:
-        logger.warning("Failed to save India portfolio: %s", exc)
-
-
-def load_india_portfolio() -> tuple:
-    """Loads Indian portfolio state from DB."""
-    if not _db_available:
-        return None, {}
-    try:
-        import json
-        with Session(get_engine()) as session:
-            row = session.query(EventLog).filter(
-                EventLog.component == "INDIA_PORTFOLIO"
-            ).first()
-            if row and row.message:
-                data = json.loads(row.message)
-                return data.get("cash"), data.get("positions", {})
-    except Exception as exc:
-        logger.warning("Failed to load India portfolio: %s", exc)
-    return None, {}
-

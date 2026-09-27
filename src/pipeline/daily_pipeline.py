@@ -262,15 +262,6 @@ def run_daily_pipeline(
             errors=[msg],
         )
 
-    # Indian market pipeline check (4 PM IST)
-    from config.settings import settings as _s
-    if getattr(_s, 'india_pipeline_hour_ist', None):
-        import pytz
-        from datetime import datetime as _dt
-        ist = pytz.timezone("Asia/Kolkata")
-        now_ist = _dt.now(ist)
-        logger.info("India pipeline hour check: current IST hour = %d", now_ist.hour)
-
     # ── Concurrency Mutex Guard ───────────────────────────────────────────────
     # In-process lock first (threads), then the machine-wide OS lock (other processes: scheduled task,
     # dashboard, CLI). The machine-wide lock is held for the entire trading cycle below.
@@ -304,11 +295,11 @@ def _active_model_sha256() -> str:
 
 
 def _resolve_market(market_name: Optional[str], tickers: Optional[List[str]]) -> str:
-    if market_name:
-        return str(market_name).strip().upper()
-    if tickers and any(str(t).endswith(".NS") or str(t).endswith(".BO") for t in tickers):
-        return "INDIA"
-    return "US"
+    """V1 trades the US market only; any other market is rejected before a run starts."""
+    market = str(market_name).strip().upper() if market_name else "US"
+    if market != "US":
+        raise ValueError(f"Unsupported market {market_name!r}: V1 supports the US market only.")
+    return market
 
 
 def _concurrent_run_rejected(run_date: Optional[str], market: str, reason: str,

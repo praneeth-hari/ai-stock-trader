@@ -335,12 +335,3 @@ def test_11_v2_portfolio_intelligence_loaders(clean_db):
     assert "pillar_breakdown" in div_summary
     assert "formula_explanation" in div_summary
     assert 0.0 <= div_summary["score"] <= 100.0
-
-
-def test_india_portfolio_settings_display():
-    from config.settings import settings
-    assert len(settings.india_tickers) == 25
-    assert settings.india_initial_capital == 10000.0
-    assert settings.india_benchmark == "^NSEI"
-
-

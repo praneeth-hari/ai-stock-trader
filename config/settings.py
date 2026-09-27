@@ -80,63 +80,6 @@ class Settings(BaseSettings):
         ),
     )
 
-    # ── Indian Market (NSE) ─────────────────────────────────────────────────────
-    india_tickers: list = Field(
-        default=[
-            "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS",
-            "HINDUNILVR.NS", "ITC.NS", "SBIN.NS", "BHARTIARTL.NS", "KOTAKBANK.NS",
-            "LT.NS", "HCLTECH.NS", "AXISBANK.NS", "ASIANPAINT.NS", "MARUTI.NS",
-            "SUNPHARMA.NS", "TITAN.NS", "ULTRACEMCO.NS", "WIPRO.NS", "NESTLEIND.NS",
-            "POWERGRID.NS", "NTPC.NS", "TECHM.NS", "BAJFINANCE.NS", "ONGC.NS"
-        ],
-        description="25 NSE Indian stocks with .NS suffix for Yahoo Finance."
-    )
-    india_initial_capital: float = Field(
-        default=10000.0,
-        description="Initial paper trading capital in INR rupees."
-    )
-    india_benchmark: str = Field(
-        default="^NSEI",
-        description="Nifty 50 index symbol."
-    )
-    india_vix_symbol: str = Field(
-        default="^INDIAVIX",
-        description="India VIX volatility symbol."
-    )
-    india_currency: str = Field(
-        default="INR",
-        description="Currency display for Indian portfolio."
-    )
-    india_pipeline_hour_ist: int = Field(
-        default=16,
-        description="Hour in IST to run Indian pipeline (4 PM after NSE close)."
-    )
-
-    # ── Market Context Helpers ──────────────────────────────────────────────────
-    def get_universe(self, market: str = "US") -> list:
-        """Return the ticker universe for the specified market ('US' or 'INDIA')."""
-        if str(market).strip().upper() == "INDIA":
-            return list(self.india_tickers)
-        return list(self.ticker_list)
-
-    def get_benchmark(self, market: str = "US") -> str:
-        """Return the benchmark symbol for the specified market ('US' or 'INDIA')."""
-        if str(market).strip().upper() == "INDIA":
-            return self.india_benchmark
-        return self.benchmark
-
-    def get_initial_capital(self, market: str = "US") -> float:
-        """Return the initial paper-trading capital for the specified market."""
-        if str(market).strip().upper() == "INDIA":
-            return float(self.india_initial_capital)
-        return float(self.initial_capital)
-
-    def get_currency_symbol(self, market: str = "US") -> str:
-        """Return the currency display symbol for the specified market."""
-        if str(market).strip().upper() == "INDIA":
-            return "₹"
-        return "$"
-
     # ── Prediction label (§1.3) ───────────────────────────────────────────────
     prediction_horizon_days: int = Field(
         default=5,
@@ -826,28 +769,33 @@ class Settings(BaseSettings):
         """Target weight per position assuming equal sizing."""
         return self.investable_fraction / self.max_positions
 
+    # ── Market Context Helpers ────────────────────────────────────────────────
+    # V1 trades the US market only. Any other market fails loud rather than
+    # silently falling back to US values.
+
+    @staticmethod
+    def _require_us(market: str) -> None:
+        if str(market).strip().upper() != "US":
+            raise ValueError(f"Unsupported market {market!r}: V1 supports the US market only.")
+
     def get_universe(self, market: str = "US") -> List[str]:
-        """Return ticker universe list for specified market ('US' or 'INDIA')."""
-        if str(market).strip().upper() == "INDIA":
-            return [t.strip() for t in self.india_tickers if t.strip()]
+        """Return the US ticker universe."""
+        self._require_us(market)
         return self.ticker_list
 
     def get_benchmark(self, market: str = "US") -> str:
-        """Return benchmark symbol for specified market ('US' or 'INDIA')."""
-        if str(market).strip().upper() == "INDIA":
-            return self.india_benchmark
+        """Return the US benchmark symbol (SPY)."""
+        self._require_us(market)
         return self.benchmark
 
     def get_initial_capital(self, market: str = "US") -> float:
-        """Return starting capital for specified market ('US' or 'INDIA')."""
-        if str(market).strip().upper() == "INDIA":
-            return float(self.india_initial_capital)
+        """Return the US starting capital."""
+        self._require_us(market)
         return float(self.initial_capital)
 
     def get_currency_symbol(self, market: str = "US") -> str:
-        """Return currency symbol for specified market ('US' or 'INDIA')."""
-        if str(market).strip().upper() == "INDIA":
-            return "₹"
+        """Return the US currency symbol."""
+        self._require_us(market)
         return "$"
 
 
@@ -856,7 +804,7 @@ class Settings(BaseSettings):
 settings = Settings()
 
 
-# ── Sector Mapping for 25-Stock Universe (US & India) ─────────────────────────
+# ── Sector Mapping for the 25-Stock US Universe ───────────────────────────────
 TICKER_SECTOR_MAP: Dict[str, str] = {
     # US Universe (25)
     "AAPL": "Technology",
@@ -884,33 +832,6 @@ TICKER_SECTOR_MAP: Dict[str, str] = {
     "XOM": "Energy",
     "CVX": "Energy",
     "COP": "Energy",
-
-    # Indian Universe (25 NSE)
-    "RELIANCE.NS": "Energy",
-    "TCS.NS": "Technology",
-    "HDFCBANK.NS": "Financials",
-    "INFY.NS": "Technology",
-    "ICICIBANK.NS": "Financials",
-    "HINDUNILVR.NS": "Consumer Staples",
-    "ITC.NS": "Consumer Staples",
-    "SBIN.NS": "Financials",
-    "BHARTIARTL.NS": "Communications",
-    "KOTAKBANK.NS": "Financials",
-    "LT.NS": "Industrials",
-    "HCLTECH.NS": "Technology",
-    "AXISBANK.NS": "Financials",
-    "ASIANPAINT.NS": "Consumer Cyclical",
-    "MARUTI.NS": "Consumer Cyclical",
-    "SUNPHARMA.NS": "Healthcare",
-    "TITAN.NS": "Consumer Cyclical",
-    "ULTRACEMCO.NS": "Industrials",
-    "WIPRO.NS": "Technology",
-    "NESTLEIND.NS": "Consumer Staples",
-    "POWERGRID.NS": "Industrials",
-    "NTPC.NS": "Energy",
-    "TECHM.NS": "Technology",
-    "BAJFINANCE.NS": "Financials",
-    "ONGC.NS": "Energy",
 }
 
 

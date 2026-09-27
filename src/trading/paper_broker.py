@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -203,7 +202,7 @@ class PaperBroker:
 
     def load_state(self) -> None:
         """
-        Restore the latest portfolio snapshot for this market ('US' or 'INDIA') from DB.
+        Restore the latest portfolio snapshot for this market ('US') from DB.
 
         If no snapshot exists (first ever run), defaults to:
           - Cash = settings.get_initial_capital(self.market)
@@ -662,112 +661,3 @@ class PaperBroker:
         )
 
         return total_equity
-
-
-# ── IndiaPaperBroker ────────────────────────────────────────────────────────────
-
-class IndiaPaperBroker(PaperBroker):
-    """
-    Paper broker for Indian NSE stocks.
-    Tracks portfolio in INR ₹ (market='INDIA') independently from US portfolio.
-    """
-
-    def __init__(self, initial_capital: Optional[float] = None) -> None:
-        super().__init__(market="INDIA")
-        from src.db import repository
-        cash_db, pos_db = repository.load_india_portfolio()
-        if cash_db is not None:
-            self.cash = float(cash_db)
-            self.positions = pos_db or {}
-        elif initial_capital is not None:
-            self.cash = float(initial_capital)
-        else:
-            self.cash = settings.india_initial_capital
-        self.capital = settings.india_initial_capital
-        self.currency = settings.india_currency
-        self.max_positions = settings.max_positions
-
-    def get_portfolio_summary(self) -> dict:
-        """Returns current Indian portfolio state."""
-        invested = 0.0
-        for p in self.positions.values():
-            qty = p.quantity if hasattr(p, "quantity") else (p.get("quantity", 0) if isinstance(p, dict) else 0)
-            price = p.current_price if hasattr(p, "current_price") else (p.entry_price if hasattr(p, "entry_price") else (p.get("current_price", p.get("entry_price", 0)) if isinstance(p, dict) else 0))
-            invested += qty * price
-        return {
-            "currency": self.currency,
-            "capital": self.capital,
-            "cash": self.cash,
-            "invested": invested,
-            "total_value": self.cash + invested,
-            "profit_loss": (self.cash + invested) - self.capital,
-            "positions": self.positions,
-            "num_positions": len(self.positions),
-        }
-
-    def buy(self, ticker: str, price: float, quantity: float) -> bool:
-        """Simulates buying an NSE stock in INR."""
-        import math
-        # Validate inputs
-        if price is None or quantity is None:
-            return False
-        if isinstance(price, float) and math.isnan(price):
-            return False
-        if isinstance(quantity, float) and math.isnan(quantity):
-            return False
-        if price <= 0 or quantity <= 0:
-            return False
-
-        from config.settings import settings
-        cost = price * quantity * (1 + settings.simulated_cost_per_trade)
-        if cost > self.cash:
-            return False
-        if len(self.positions) >= self.max_positions:
-            return False
-        if ticker in self.positions:
-            return False
-        self.cash -= cost
-        self.positions[ticker] = {
-            "ticker": ticker,
-            "quantity": quantity,
-            "entry_price": price,
-            "current_price": price,
-            "cost": cost,
-        }
-        # Persist to DB
-        from src.db import repository
-        repository.save_india_portfolio(self.cash, self.positions)
-        return True
-
-    def sell(self, ticker: str, price: float) -> bool:
-        """Simulates selling an NSE stock in INR."""
-        import math
-        # Validate inputs
-        if price is None:
-            return False
-        if isinstance(price, float) and math.isnan(price):
-            return False
-        if price <= 0:
-            return False
-
-        from config.settings import settings
-        if ticker not in self.positions:
-            return False
-        pos = self.positions.pop(ticker)
-        qty = pos.quantity if hasattr(pos, "quantity") else (pos["quantity"] if isinstance(pos, dict) else 0)
-        proceeds = price * qty * (1 - settings.simulated_cost_per_trade)
-        self.cash += proceeds
-        # Persist to DB
-        from src.db import repository
-        repository.save_india_portfolio(self.cash, self.positions)
-        return True
-
-    def update_prices(self, prices: dict) -> None:
-        """Updates current prices for all held positions."""
-        for ticker, price in prices.items():
-            if ticker in self.positions:
-                pos = self.positions[ticker]
-                if hasattr(pos, "current_price"):
-                    pos.current_price = price
-                elif isinstance(pos, dict):
-                    pos["current_price"] = price
