@@ -60,6 +60,12 @@ class Settings(BaseSettings):
         description="Starting paper-trading capital in USD.",
     )
 
+    # ── Operator profile (display only) ───────────────────────────────────────
+    operator_name: str = Field(
+        default="Hari Praneeth",
+        description="Name shown in the dashboard greeting. Display only; never affects trading.",
+    )
+
     # ── Universe ──────────────────────────────────────────────────────────────
     # Declared as str so pydantic-settings does NOT attempt JSON-decode on the
     # comma-separated .env value.  parse_tickers converts it to List[str].

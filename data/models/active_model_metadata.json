@@ -1,0 +1,70 @@
+{
+  "model_name": "logistic_regression_baseline_v1",
+  "model_type": "baseline",
+  "version": "1.0",
+  "created_at_utc": "2026-09-12T19:26:00.106891+00:00",
+  "prediction_horizon_days": 5,
+  "win_threshold": 0.01,
+  "feature_columns": [
+    "price_to_ma20",
+    "price_to_ma50",
+    "price_to_ma200",
+    "ma5_above_ma20",
+    "roc_5",
+    "roc_21",
+    "rsi_14",
+    "macd_line",
+    "macd_signal",
+    "macd_hist",
+    "vol_20",
+    "atr_14",
+    "vol_ratio_5_20",
+    "vol_spike",
+    "rel_strength_21"
+  ],
+  "features_count": 15,
+  "split_info": {
+    "train_start_date": "2019-12-13",
+    "train_end_date": "2023-12-01",
+    "test_start_date": "2023-12-11",
+    "test_end_date": "2024-08-23",
+    "purged_gap_dates": [
+      "2023-12-04",
+      "2023-12-05",
+      "2023-12-06",
+      "2023-12-07",
+      "2023-12-08"
+    ],
+    "gap_days_count": 5,
+    "train_rows": 2997,
+    "test_rows": 531,
+    "purged_rows": 15
+  },
+  "class_balance_train": {
+    "positive": 1363,
+    "negative": 1634,
+    "positive_ratio": 0.4548
+  },
+  "class_balance_test": {
+    "positive": 257,
+    "negative": 274,
+    "positive_ratio": 0.484
+  },
+  "hyperparameters": {
+    "scaling": "StandardScaler (fit on train only)",
+    "solver": "lbfgs",
+    "max_iter": 1000,
+    "class_weight": "balanced",
+    "random_state": 42
+  },
+  "preliminary_test_metrics": {
+    "accuracy": 0.5009,
+    "roc_auc": 0.5303,
+    "brier_score": 0.2494
+  },
+  "promotion_status": "promoted_active",
+  "promoted_at_utc": "2026-09-25T15:36:02.027623+00:00",
+  "promoted_by": "claude-code",
+  "promotion_reason": "Restore consistent active pair: active_model.joblib already was this Baseline file, but metadata belonged to hist_gradient_boosting_v1_20260921",
+  "source_candidate_file": "logistic_regression_baseline_v1_20260912_192600.joblib"
+}

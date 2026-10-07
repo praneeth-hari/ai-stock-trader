@@ -56,6 +56,42 @@ def is_cloud_database() -> bool:
     return url.startswith("postgresql") or url.startswith("postgres")
 
 
+def verify_ci_database_guard(force_check: bool = False) -> None:
+    """
+    CI Preflight Guard: Ensure GitHub Actions can NEVER silently fall back to SQLite.
+
+    When running in CI / GitHub Actions (or when force_check=True):
+      - requires DATABASE_URL to be set in environment
+      - requires it to be a valid PostgreSQL URL
+      - fails immediately before the trader starts if DATABASE_URL is missing or invalid
+      - does NOT modify normal local development behavior
+    """
+    is_ci = force_check or (
+        os.getenv("GITHUB_ACTIONS", "").lower() in ("true", "1")
+        or os.getenv("CI", "").lower() in ("true", "1")
+    )
+    if not is_ci:
+        return
+
+    # In CI unit testing under pytest, skip unless explicitly forcing the guard check
+    if os.getenv("PYTEST_CURRENT_TEST") and not force_check:
+        return
+
+    raw_url = os.environ.get("DATABASE_URL")
+    if not raw_url or not raw_url.strip():
+        raise RuntimeError(
+            "CI DATABASE SAFETY GUARD: DATABASE_URL environment variable is required in CI / GitHub Actions "
+            "to prevent silent fallback to SQLite. Please configure the DATABASE_URL repository secret."
+        )
+
+    clean = raw_url.strip().lower()
+    if not (clean.startswith("postgresql://") or clean.startswith("postgres://") or clean.startswith("postgresql+")):
+        raise ValueError(
+            f"CI DATABASE SAFETY GUARD: DATABASE_URL must be a PostgreSQL URL (got '{raw_url[:15]}...'). "
+            "Cloud runners must never use SQLite."
+        )
+
+
 def get_cloud_engine(url: Optional[str] = None) -> Engine:
     """
     Create a SQLAlchemy engine configured for the cloud or fallback database.

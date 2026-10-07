@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import datetime as _dt
+from html import escape as _escape
 from pathlib import Path
 
 # Add project root to sys.path so dashboard can import config and src
@@ -308,6 +310,26 @@ def fmt_c_delta(val: float | int | None) -> str:
 
 
 # ── Main Dashboard Header & Market Banner ──────────────────────────────────────
+
+def _greeting_period(hour: int) -> str:
+    """Time-of-day greeting for the machine's local hour (the dashboard runs on this machine)."""
+    if 5 <= hour < 12:
+        return "Good morning"
+    if 12 <= hour < 17:
+        return "Good afternoon"
+    return "Good evening"
+
+
+st.markdown(f"""
+<div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 16px 20px; margin-bottom: 16px; box-sizing: border-box; max-width: 100%;">
+    <div style="font-size: clamp(20px, 4vw, 26px); font-weight: 600; color: #0f172a; line-height: 1.3; overflow-wrap: anywhere;">
+        {_greeting_period(_dt.now().hour)}, {_escape(settings.operator_name)}
+    </div>
+    <div style="font-size: clamp(13px, 2.5vw, 15px); color: #475569; margin-top: 4px;">
+        Here’s your trading command center for today.
+    </div>
+</div>
+""", unsafe_allow_html=True)
 
 st.title("📈 AI Stock Trader — Operator Monitoring Dashboard")
 st.markdown("Automated algorithmic trading system running daily paper cycles with strict capital preservation rules.")

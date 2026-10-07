@@ -57,6 +57,7 @@ from config.settings import settings
 from src.data.market_data import fetch_ticker_data
 from src.data.validation import LIVE_FETCH_LOOKBACK_DAYS, validate_ticker_data
 from src.db import repository
+from src.db.cloud_db import verify_ci_database_guard
 from src.features.engineer import compute_features
 from src.intelligence import (
     analyze_universe_sentiment,
@@ -238,7 +239,19 @@ def run_daily_pipeline(
     Guaranteed Idempotent: If run_daily_pipeline has already executed for run_date,
     it safely skips re-execution unless force=True.
     """
+    # ── CI Database Safety Guard ──────────────────────────────────────────────
+    verify_ci_database_guard()
+
     # ── Emergency Kill Switch ─────────────────────────────────────────────────
+    try:
+        db_ks_enabled, db_ks_reason = repository.load_kill_switch_state()
+        if db_ks_enabled:
+            settings.kill_switch_enabled = True
+            if db_ks_reason:
+                settings.kill_switch_reason = db_ks_reason
+    except Exception as exc:
+        logger.warning("Could not check persisted kill switch state: %s", exc)
+
     if settings.kill_switch_enabled:
         target_date_str = run_date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
         reason = settings.kill_switch_reason or "No reason provided."

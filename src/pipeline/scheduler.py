@@ -46,6 +46,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from config.settings import settings
 from src.db import repository
+from src.db.cloud_db import verify_ci_database_guard
 from src.pipeline.daily_pipeline import DailyPipelineResult, run_daily_pipeline
 
 logger = logging.getLogger("src.pipeline.scheduler")
@@ -198,8 +199,21 @@ def execute_scheduled_job(
     today_str = run_date or date.today().strftime("%Y-%m-%d")
     target_d = datetime.strptime(today_str, "%Y-%m-%d").date()
 
+    # ── CI Database Safety Guard ──────────────────────────────────────────────
+    verify_ci_database_guard()
+
     # Ensure tables exist (idempotent)
     repository.create_all_tables()
+
+    # ── Synchronize Persisted Kill Switch ─────────────────────────────────────
+    try:
+        db_ks_enabled, db_ks_reason = repository.load_kill_switch_state()
+        if db_ks_enabled:
+            settings.kill_switch_enabled = True
+            if db_ks_reason:
+                settings.kill_switch_reason = db_ks_reason
+    except Exception as exc:
+        logger.warning("Could not check persisted kill switch state: %s", exc)
 
     logger.info("Scheduler triggered for date: %s", today_str)
 
@@ -329,6 +343,9 @@ def create_scheduler() -> BlockingScheduler:
 
 def main() -> None:
     """CLI entrypoint for the scheduler module."""
+    # ── CI Database Safety Guard ──────────────────────────────────────────────
+    verify_ci_database_guard()
+
     parser = argparse.ArgumentParser(description="AI Stock Trader — Local Daily Automation Scheduler")
     parser.add_argument(
         "--once",

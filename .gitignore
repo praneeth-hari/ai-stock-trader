@@ -5,7 +5,9 @@ data/fundamentals/
 data/raw/
 data/reports/
 data/processed/
-data/models/
+data/models/*
+!data/models/active_model.joblib
+!data/models/active_model_metadata.json
 data/pending_orders_*.json
 data/backtest_cache/
 data/locks/
