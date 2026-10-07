@@ -210,11 +210,19 @@ def create_all_tables() -> None:
 
         with engine.connect() as conn:
             if "market_data" in table_names:
-                cols = {c["name"] for c in inspector.get_columns("market_data")}
+                cols_meta = inspector.get_columns("market_data")
+                cols = {c["name"] for c in cols_meta}
                 if "data_as_of" not in cols:
-                    conn.execute(text("ALTER TABLE market_data ADD COLUMN data_as_of VARCHAR(30)"))
+                    conn.execute(text("ALTER TABLE market_data ADD COLUMN data_as_of VARCHAR(64)"))
                     conn.commit()
                     logger.info("Migrated schema: added market_data.data_as_of")
+                elif "sqlite" not in str(engine.url):
+                    dao_col = next((c for c in cols_meta if c["name"] == "data_as_of"), None)
+                    c_len = getattr(dao_col.get("type"), "length", None) if dao_col else None
+                    if c_len is not None and c_len < 64:
+                        conn.execute(text("ALTER TABLE market_data ALTER COLUMN data_as_of TYPE VARCHAR(64)"))
+                        conn.commit()
+                        logger.info("Widened market_data.data_as_of from VARCHAR(%d) to VARCHAR(64)", c_len)
 
             if "portfolio" in table_names:
                 cols = {c["name"] for c in inspector.get_columns("portfolio")}

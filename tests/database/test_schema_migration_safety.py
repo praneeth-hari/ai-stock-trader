@@ -149,3 +149,108 @@ def test_a_failed_migration_stops_the_pipeline_with_no_stateless_trading(old_db)
     assert not model.predict_proba.called, "no model inference, no trading decisions"
     assert sent == [True], "a failure alert was sent"
     assert _fingerprint(old_db) == before, "database untouched"
+
+
+def test_market_data_as_of_model_metadata():
+    """Verify that MarketDataRow.data_as_of has length 64 in ORM metadata."""
+    from src.db.models import MarketDataRow
+    col = MarketDataRow.__table__.columns["data_as_of"]
+    assert col.type.length == 64
+
+
+def test_postgres_data_as_of_widens_from_30_to_64():
+    """Verify that PostgreSQL schema upgrade widens data_as_of from VARCHAR(30) to VARCHAR(64)."""
+    from sqlalchemy import VARCHAR
+    executed_statements = []
+
+    mock_conn = MagicMock()
+    mock_conn.execute.side_effect = lambda stmt: executed_statements.append(str(stmt))
+
+    mock_engine = MagicMock()
+    mock_engine.url = "postgresql+psycopg2://user:pass@ep-pooler.supabase.com:5432/postgres"
+    mock_engine.connect.return_value.__enter__.return_value = mock_conn
+
+    mock_inspector = MagicMock()
+    mock_inspector.get_table_names.return_value = ["market_data"]
+    mock_inspector.get_columns.return_value = [
+        {"name": "id", "type": MagicMock()},
+        {"name": "data_as_of", "type": VARCHAR(30)},
+    ]
+
+    with patch("src.db.repository.get_engine", return_value=mock_engine), \
+         patch("src.db.repository._probe_db_connection", return_value=True), \
+         patch("src.db.repository.Base.metadata.create_all"), \
+         patch("sqlalchemy.inspect", return_value=mock_inspector):
+        repository.create_all_tables()
+
+    alter_sql = "ALTER TABLE market_data ALTER COLUMN data_as_of TYPE VARCHAR(64)"
+    assert any(alter_sql in s for s in executed_statements), f"Expected {alter_sql} in {executed_statements}"
+
+
+def test_postgres_data_as_of_already_64_no_op():
+    """Verify that PostgreSQL schema upgrade does nothing if data_as_of is already VARCHAR(64)."""
+    from sqlalchemy import VARCHAR
+    executed_statements = []
+
+    mock_conn = MagicMock()
+    mock_conn.execute.side_effect = lambda stmt: executed_statements.append(str(stmt))
+
+    mock_engine = MagicMock()
+    mock_engine.url = "postgresql+psycopg2://user:pass@ep-pooler.supabase.com:5432/postgres"
+    mock_engine.connect.return_value.__enter__.return_value = mock_conn
+
+    mock_inspector = MagicMock()
+    mock_inspector.get_table_names.return_value = ["market_data"]
+    mock_inspector.get_columns.return_value = [
+        {"name": "id", "type": MagicMock()},
+        {"name": "data_as_of", "type": VARCHAR(64)},
+    ]
+
+    with patch("src.db.repository.get_engine", return_value=mock_engine), \
+         patch("src.db.repository._probe_db_connection", return_value=True), \
+         patch("src.db.repository.Base.metadata.create_all"), \
+         patch("sqlalchemy.inspect", return_value=mock_inspector):
+        repository.create_all_tables()
+
+    alter_sql = "ALTER TABLE market_data ALTER COLUMN data_as_of"
+    assert not any(alter_sql in s for s in executed_statements), f"Did not expect {alter_sql} in {executed_statements}"
+
+
+def test_sqlite_data_as_of_unaffected_and_accepts_iso_timestamp(tmp_path):
+    """Verify that SQLite path remains unaffected and safely accepts 32-char ISO timestamps."""
+    from datetime import datetime, timezone
+    from src.db.models import MarketDataRow
+    from sqlalchemy.orm import Session
+
+    db_path = tmp_path / "sqlite_test.db"
+    orig_url = settings.db_url
+    try:
+        settings.db_url = f"sqlite:///{db_path.as_posix()}"
+        repository._engine, repository._db_available = None, True
+        repository.create_all_tables()
+
+        # Insert 32-char ISO timestamp
+        iso_ts = datetime.now(timezone.utc).isoformat()  # e.g. 2026-10-07T12:45:26.000895+00:00 (32 chars)
+        assert len(iso_ts) >= 32
+
+        with Session(repository.get_engine()) as session:
+            row = MarketDataRow(
+                date="2026-10-07",
+                ticker="TEST",
+                open=100.0,
+                high=105.0,
+                low=99.0,
+                close=104.0,
+                volume=10000.0,
+                data_as_of=iso_ts,
+            )
+            session.add(row)
+            session.commit()
+
+        # Retrieve and verify exact string
+        retrieved = repository.get_market_data("TEST", include_metadata=True)
+        assert not retrieved.empty
+        assert retrieved["data_as_of"].iloc[0] == iso_ts
+    finally:
+        settings.db_url = orig_url
+        repository._engine, repository._db_available = None, True
