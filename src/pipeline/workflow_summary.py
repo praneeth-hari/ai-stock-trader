@@ -78,9 +78,12 @@ def extract_audit_block(log_text: str) -> Tuple[Optional[str], Optional[str]]:
     if not log_text:
         return None, None
 
+    status_match = re.search(r"PIPELINE STATUS:\s*([A-Za-z0-9_]+)", log_text)
+    pipeline_status = status_match.group(1) if status_match else None
+
     header_match = re.search(r"(## Daily Pipeline Audit — [^\r\n]+)", log_text)
     if not header_match:
-        return None, None
+        return None, pipeline_status
 
     start_idx = header_match.start()
     rest = log_text[start_idx:]
@@ -91,10 +94,6 @@ def extract_audit_block(log_text: str) -> Tuple[Optional[str], Optional[str]]:
         audit_text = rest[: end_marker.start()].strip()
     else:
         audit_text = rest.strip()
-
-    # Extract pipeline status
-    status_match = re.search(r"PIPELINE STATUS:\s*(\w+)", log_text)
-    pipeline_status = status_match.group(1) if status_match else None
 
     if not pipeline_status:
         inner_status = re.search(r"- Status:\s*\*\*([^\*]+)\*\*", audit_text)
@@ -167,7 +166,10 @@ def extract_error_lines(log_text: str, max_lines: int = 25) -> str:
     return sanitize_text(snippet)
 
 
-def check_database_verification(run_date: Optional[str]) -> Tuple[str, str]:
+def check_database_verification(
+    run_date: Optional[str],
+    is_skipped: bool = False,
+) -> Tuple[str, str]:
     """
     Perform an independent, safe read-only check to verify whether today's
     portfolio snapshot actually exists in the database.
@@ -175,6 +177,12 @@ def check_database_verification(run_date: Optional[str]) -> Tuple[str, str]:
     Returns:
         (pipeline_log_indicator, independent_verification_result)
     """
+    if is_skipped:
+        return (
+            "Not applicable — market closed (no database writes scheduled)",
+            "Not applicable — no portfolio snapshot expected for a skipped cycle",
+        )
+
     if not run_date:
         return (
             "Not determined (pipeline did not establish run date)",
@@ -236,28 +244,58 @@ def format_workflow_summary(
     audit_text, pipeline_status = extract_audit_block(log_text)
     fields = parse_audit_fields(audit_text) if audit_text else {}
 
+    raw_status = pipeline_status or fields.get("status") or ("SUCCESS" if is_success else "FAILED")
+    status = raw_status.strip()
+
+    # Determine if this was a skipped cycle (e.g. market closed)
+    is_skipped = (
+        status in ("SKIPPED", "SKIPPED_MARKET_CLOSED")
+        or fields.get("status") in ("SKIPPED", "SKIPPED_MARKET_CLOSED")
+        or fields.get("regime") == "SKIPPED_MARKET_CLOSED"
+        or "SKIPPED_MARKET_CLOSED" in log_text
+        or (is_success and "Market Closed" in log_text)
+    ) and status not in ("FAILED", "HALTED")
+
     run_date = fields.get("run_date")
-    status = pipeline_status or fields.get("status") or ("SUCCESS" if is_success else "FAILED")
+    if not run_date and is_skipped:
+        date_match = re.search(r"(\d{4}-\d{2}-\d{2})", log_text)
+        if date_match:
+            run_date = date_match.group(1)
 
     # DB persistence check
     log_indicator, db_verification = (
-        check_database_verification(run_date)
+        check_database_verification(run_date, is_skipped=is_skipped)
         if verify_db
         else (
-            "Pipeline logs not verified",
-            "Independent database check skipped.",
+            (
+                "Not applicable — market closed (no database writes scheduled)"
+                if is_skipped
+                else "Pipeline logs not verified"
+            ),
+            (
+                "Not applicable — no portfolio snapshot expected for a skipped cycle"
+                if is_skipped
+                else "Independent database check skipped."
+            ),
         )
     )
 
     # Check if pipeline explicitly reported database unavailability
-    if log_text and "DATABASE UNAVAILABLE" in log_text:
+    if not is_skipped and log_text and "DATABASE UNAVAILABLE" in log_text:
         log_indicator = "❌ Database was UNAVAILABLE during run (stateless mode — no DB writes)"
 
     # Build markdown
     lines: List[str] = []
 
     # Title
-    status_icon = "✅" if (is_success and status == "SUCCESS") else ("⚠️" if status == "DEGRADED" else "❌")
+    if is_skipped:
+        status_icon = "⏭️"
+    elif is_success and status == "SUCCESS":
+        status_icon = "✅"
+    elif status == "DEGRADED":
+        status_icon = "⚠️"
+    else:
+        status_icon = "❌"
     lines.append(f"# {status_icon} Daily Trading Pipeline — Run #{run_num}")
     lines.append("")
 
@@ -275,9 +313,11 @@ def format_workflow_summary(
         lines.append(f"| **Commit** | `{sha[:7]}` |")
 
     lines.append(f"| **Workflow Outcome** | {'✅ Success' if is_success else '❌ Failed'} |")
-    lines.append(f"| **Pipeline Status** | **{status}** |")
+    pipeline_status_display = "⏭️ SKIPPED — US market closed" if is_skipped else f"**{status}**"
+    lines.append(f"| **Pipeline Status** | {pipeline_status_display} |")
     lines.append(f"| **Run Date** | {run_date or '*Not established*'} |")
-    lines.append(f"| **Market Regime** | {fields.get('regime', '*Not established*')} |")
+    regime_display = fields.get("regime", "SKIPPED_MARKET_CLOSED" if is_skipped else "*Not established*")
+    lines.append(f"| **Market Regime** | {regime_display} |")
     lines.append("")
 
     # Audit Metrics or Failure Report
@@ -287,7 +327,12 @@ def format_workflow_summary(
         lines.append("### Data Ingestion & Validation")
         lines.append(f"- **Tickers Fetched:** {fields.get('tickers_fetched', 'N/A')}")
         lines.append(f"- **Passed Validation:** {fields.get('tickers_valid', 'N/A')}")
-        lines.append(f"- **Skipped (Bad Data):** {fields.get('tickers_skipped', 'N/A')}")
+        skipped_bad_data = (
+            "N/A — no data validation performed"
+            if is_skipped
+            else fields.get("tickers_skipped", "N/A")
+        )
+        lines.append(f"- **Skipped (Bad Data):** {skipped_bad_data}")
         lines.append("")
 
         lines.append("### Orders & Fills")
@@ -297,13 +342,18 @@ def format_workflow_summary(
         lines.append("")
 
         lines.append("### Portfolio State (End of Day)")
-        lines.append(f"- **Cash:** {fields.get('cash', 'N/A')}")
-        lines.append(f"- **Total Equity:** {fields.get('total_equity', 'N/A')}")
-        lines.append(f"- **Realized PnL Today:** {fields.get('realized_pnl', 'N/A')}")
+        if is_skipped:
+            lines.append("- **Cash:** N/A — no trading cycle executed")
+            lines.append("- **Total Equity:** N/A — no trading cycle executed")
+            lines.append("- **Realized PnL Today:** N/A — no trading cycle executed")
+        else:
+            lines.append(f"- **Cash:** {fields.get('cash', 'N/A')}")
+            lines.append(f"- **Total Equity:** {fields.get('total_equity', 'N/A')}")
+            lines.append(f"- **Realized PnL Today:** {fields.get('realized_pnl', 'N/A')}")
         lines.append("")
 
         if "errors" in fields:
-            lines.append("### ⚠ Errors Reported by Pipeline")
+            lines.append("### ℹ️ Execution Notes / Skip Reason" if is_skipped else "### ⚠ Errors Reported by Pipeline")
             lines.append(fields["errors"])
             lines.append("")
 
@@ -314,6 +364,33 @@ def format_workflow_summary(
                 lines.append("### Fills Executed Today")
                 lines.append(table_match.group(1).strip())
                 lines.append("")
+    elif is_skipped:
+        # Skipped run without a full audit block
+        lines.append("## 📊 Trading Execution & Portfolio Metrics")
+        lines.append("")
+        lines.append("### Data Ingestion & Validation")
+        lines.append("- **Tickers Fetched:** 0")
+        lines.append("- **Passed Validation:** 0")
+        lines.append("- **Skipped (Bad Data):** N/A — no data validation performed")
+        lines.append("")
+
+        lines.append("### Orders & Fills")
+        lines.append("- **Orders Generated:** 0")
+        lines.append("- **Fills Executed:** 0")
+        lines.append("- **Pending Orders for Next Open:** 0")
+        lines.append("")
+
+        lines.append("### Portfolio State (End of Day)")
+        lines.append("- **Cash:** N/A — no trading cycle executed")
+        lines.append("- **Total Equity:** N/A — no trading cycle executed")
+        lines.append("- **Realized PnL Today:** N/A — no trading cycle executed")
+        lines.append("")
+
+        skip_match = re.search(r"Market Closed[^\r\n]+", log_text)
+        if skip_match:
+            lines.append("### ℹ️ Execution Notes / Skip Reason")
+            lines.append(f"- {sanitize_text(skip_match.group(0).strip())}")
+            lines.append("")
     else:
         # Incomplete / failed run
         lines.append("## ⚠️ Pipeline Execution Failure Report")

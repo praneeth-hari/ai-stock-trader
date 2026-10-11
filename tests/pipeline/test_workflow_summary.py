@@ -63,6 +63,43 @@ Traceback (most recent call last):
 psycopg.OperationalError: connection to server at "db.host.com" failed: Connection timed out
 """
 
+SAMPLE_SKIPPED_LOG = """
+2026-10-10 11:15:00 [INFO] scheduler: Executing scheduled pipeline cycle for 2026-10-10 (force=False)...
+2026-10-10 11:15:00 [INFO] scheduler: Market Closed (US): Weekend (Saturday). Skipping daily paper pipeline cycle.
+
+## Daily Pipeline Audit — 2026-10-10
+
+- Status: **SKIPPED**
+
+### Data Fetch & Validation
+- Tickers fetched: **0**
+- Passed validation: **0**
+- Skipped (bad data): **26**
+- Market Regime: **SKIPPED_MARKET_CLOSED**
+
+### Orders & Fills
+- Orders generated: **0**
+- Fills executed: **0** (0 BUY, 0 SELL)
+- Pending orders for next open: **0**
+
+### Portfolio State (End of Day)
+- Cash: **$0.0000** (100.0% of equity)
+- Total Equity: **$0.0000**
+- Realized PnL Today: **+0.0000**
+
+### ⚠ Errors
+- Market Closed (US): Weekend (Saturday). Skipping daily paper pipeline cycle.
+
+PIPELINE STATUS: SKIPPED (exit code 0)
+"""
+
+SAMPLE_SKIPPED_NO_AUDIT_LOG = """
+2026-10-10 11:15:00 [INFO] scheduler: Scheduler triggered for date: 2026-10-10
+2026-10-10 11:15:00 [INFO] scheduler: Market Closed: Weekend (Saturday). Skipping paper pipeline cycle.
+Cycle did not execute (market closed or failure logged).
+PIPELINE STATUS: SKIPPED (exit code 0)
+"""
+
 
 def test_sanitize_text_masks_credentials_and_tokens(monkeypatch):
     """Verify secrets, database passwords, tokens, and sensitive env variables are redacted."""
@@ -155,6 +192,11 @@ def test_database_verification_distinguishes_pipeline_and_db_results():
     assert "Not determined" in indicator
     assert "Unverified" in verif
 
+    # When cycle is skipped
+    indicator_skip, verif_skip = check_database_verification("2026-10-10", is_skipped=True)
+    assert "Not applicable — market closed" in indicator_skip
+    assert "Not applicable — no portfolio snapshot expected for a skipped cycle" in verif_skip
+
     # Mock snapshot exists
     with patch("src.db.repository.get_portfolio_snapshot", return_value={"total_value": 10000.0}):
         indicator, verif = check_database_verification("2026-10-01")
@@ -165,6 +207,116 @@ def test_database_verification_distinguishes_pipeline_and_db_results():
     with patch("src.db.repository.get_portfolio_snapshot", return_value=None):
         indicator, verif = check_database_verification("2026-10-01")
         assert "Unconfirmed — portfolio snapshot for 2026-10-01 was not found" in verif
+
+
+def test_format_workflow_summary_skipped_market_closed(monkeypatch):
+    """Verify skipped run summary displays skip icon, separates workflow outcome, and avoids $0 / false DB claims."""
+    monkeypatch.setenv("GITHUB_RUN_NUMBER", "201")
+    monkeypatch.setenv("GITHUB_SHA", "fedcba9876543210")
+
+    summary = format_workflow_summary(SAMPLE_SKIPPED_LOG, outcome="success", verify_db=True)
+
+    # 1. Title heading has skip icon, not red failure heading
+    assert "# ⏭️ Daily Trading Pipeline — Run #201" in summary
+    assert "# ❌" not in summary
+
+    # 2. Workflow outcome is separated from trading pipeline status
+    assert "| **Workflow Outcome** | ✅ Success |" in summary
+    assert "| **Pipeline Status** | ⏭️ SKIPPED — US market closed |" in summary
+    assert "| **Market Regime** | SKIPPED_MARKET_CLOSED |" in summary
+
+    # 3. Tickers, orders, and fills are shown as 0 / appropriate, and bad data is N/A
+    assert "- **Tickers Fetched:** 0" in summary
+    assert "- **Passed Validation:** 0" in summary
+    assert "- **Skipped (Bad Data):** N/A — no data validation performed" in summary
+    assert "Skipped (Bad Data): 26" not in summary
+    assert "- **Orders Generated:** 0" in summary
+    assert "- **Fills Executed:** 0 (0 BUY, 0 SELL)" in summary
+
+    # 4. Cash, total equity, and realized PnL are N/A, not $0.0000
+    assert "- **Cash:** N/A — no trading cycle executed" in summary
+    assert "- **Total Equity:** N/A — no trading cycle executed" in summary
+    assert "- **Realized PnL Today:** N/A — no trading cycle executed" in summary
+    assert "$0.0000" not in summary
+
+    # 5. Database verification is 'Not applicable' and does not claim writes
+    assert "- **Independent Database Verification:** Not applicable — no portfolio snapshot expected for a skipped cycle" in summary
+    assert "Write activity logged" not in summary
+
+    # 6. Does not report as an unhandled failure
+    assert "Pipeline Execution Failure Report" not in summary
+
+
+def test_format_workflow_summary_skipped_without_audit_block(monkeypatch):
+    """Verify skipped cycle without audit markdown block still renders cleanly as skipped."""
+    monkeypatch.setenv("GITHUB_RUN_NUMBER", "202")
+
+    summary = format_workflow_summary(SAMPLE_SKIPPED_NO_AUDIT_LOG, outcome="success", verify_db=True)
+
+    assert "# ⏭️ Daily Trading Pipeline — Run #202" in summary
+    assert "# ❌" not in summary
+    assert "| **Workflow Outcome** | ✅ Success |" in summary
+    assert "| **Pipeline Status** | ⏭️ SKIPPED — US market closed |" in summary
+    assert "- **Tickers Fetched:** 0" in summary
+    assert "- **Passed Validation:** 0" in summary
+    assert "- **Skipped (Bad Data):** N/A — no data validation performed" in summary
+    assert "- **Orders Generated:** 0" in summary
+    assert "- **Cash:** N/A — no trading cycle executed" in summary
+    assert "- **Independent Database Verification:** Not applicable — no portfolio snapshot expected for a skipped cycle" in summary
+    assert "Pipeline Execution Failure Report" not in summary
+
+
+def test_skipped_report_does_not_display_misleading_bad_data_count():
+    """Verify that market-closed cycles never report tickers as bad data."""
+    log_with_skipped_tickers = """
+## Daily Pipeline Audit — 2026-10-10
+- Status: **SKIPPED**
+### Data Fetch & Validation
+- Tickers fetched: **0**
+- Passed validation: **0**
+- Skipped (bad data): **26**
+- Market Regime: **SKIPPED_MARKET_CLOSED**
+### Orders & Fills
+- Orders generated: **0**
+- Fills executed: **0**
+- Pending orders for next open: **0**
+### Portfolio State (End of Day)
+- Cash: **$0.0000**
+- Total Equity: **$0.0000**
+- Realized PnL Today: **+0.0000**
+PIPELINE STATUS: SKIPPED (exit code 0)
+"""
+    summary = format_workflow_summary(log_with_skipped_tickers, outcome="success", verify_db=False)
+    assert "- **Skipped (Bad Data):** N/A — no data validation performed" in summary
+    assert "Skipped (Bad Data): 26" not in summary
+
+
+def test_format_workflow_summary_explicit_pipeline_failure(monkeypatch):
+    """Verify actual pipeline failure with status FAILED remains clearly marked as a failure with red icon."""
+    monkeypatch.setenv("GITHUB_RUN_NUMBER", "203")
+
+    failing_audit_log = """
+## Daily Pipeline Audit — 2026-10-01
+
+- Status: **FAILED**
+
+### Data Fetch & Validation
+- Tickers fetched: **10**
+- Passed validation: **0**
+- Skipped (bad data): **10**
+- Market Regime: **CRASH**
+
+### ⚠ Errors
+- All tickers failed validation!
+
+PIPELINE STATUS: FAILED (exit code 1)
+"""
+    summary = format_workflow_summary(failing_audit_log, outcome="failure", verify_db=False)
+
+    assert "# ❌ Daily Trading Pipeline — Run #203" in summary
+    assert "| **Workflow Outcome** | ❌ Failed |" in summary
+    assert "| **Pipeline Status** | **FAILED** |" in summary
+    assert "⏭️ SKIPPED" not in summary
 
 
 def test_main_cli_writes_to_step_summary(tmp_path, monkeypatch):
