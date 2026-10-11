@@ -36,6 +36,8 @@ jobs:
       run: pip install -r requirements.txt
       
     - name: Run trading pipeline
+      id: pipeline
+      shell: bash
       env:
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -44,7 +46,16 @@ jobs:
         FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
         EMAIL_ALERTS_ENABLED: false
         DATABASE_URL: ${{ secrets.DATABASE_URL }}
-      run: python -m src.pipeline.scheduler --force
+      run: |
+        set -o pipefail
+        python -m src.pipeline.scheduler --force 2>&1 | tee /tmp/pipeline_run.log
+
+    - name: Publish Trading Audit Summary
+      if: always()
+      env:
+        PIPELINE_OUTCOME: ${{ steps.pipeline.outcome }}
+        DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      run: python -m src.pipeline.workflow_summary /tmp/pipeline_run.log
 
     - name: Notify success
       if: success()
