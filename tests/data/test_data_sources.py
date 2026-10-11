@@ -70,6 +70,64 @@ class TestPrimarySource:
         mock_log.assert_called_once()
         assert "DATA_SOURCE: yfinance (primary)" in mock_log.call_args[0][2]
 
+    def test_yfinance_configured_timeout_passed_to_download(self):
+        """Verify the configured timeout is passed to yf.download()."""
+        with patch.object(ds.settings, "data_fetch_timeout_sec", 42.0), \
+             patch("yfinance.download", return_value=_dummy_raw_df()) as mock_dl:
+            df = ds._fetch_yfinance_primary("AAPL")
+            assert not df.empty
+            mock_dl.assert_called_once()
+            assert mock_dl.call_args[1]["timeout"] == 42.0
+
+    def test_yfinance_explicit_timeout_override(self):
+        """Verify explicit timeout_sec overrides default settings."""
+        with patch("yfinance.download", return_value=_dummy_raw_df()) as mock_dl:
+            df = ds._fetch_yfinance_primary("AAPL", timeout_sec=15.0)
+            assert not df.empty
+            mock_dl.assert_called_once()
+            assert mock_dl.call_args[1]["timeout"] == 15.0
+
+    def test_yfinance_timeout_error_retries_and_falls_back(self):
+        """Verify timeout error retries boundedly and falls back to backup source without sleeping after final failure."""
+        sleep_durations = []
+        with patch("yfinance.download", side_effect=TimeoutError("Request timed out")) as mock_dl, \
+             patch("time.sleep", side_effect=sleep_durations.append), \
+             patch("src.data.data_sources._fetch_alpha_vantage_backup", return_value=ds.normalize_av_df(_dummy_av_raw_df(), "AAPL")), \
+             patch("src.alerts.email_alerts.send_failover_alert"), \
+             patch("src.alerts.telegram_alerts.notify_failover"):
+            df = ds.fetch_with_fallback("AAPL", max_retries=3, retry_wait_sec=5.0, save_raw=False)
+
+        assert not df.empty
+        assert mock_dl.call_count == 3
+        # Sleep called exactly max_retries - 1 times with retry_wait_sec (no sleep after final failure)
+        assert len(sleep_durations) == 2
+        assert sleep_durations == [5.0, 5.0]
+
+    def test_yfinance_empty_result_retries_and_falls_back(self):
+        """Verify empty yfinance result retries boundedly and falls back without sleeping after final failure."""
+        sleep_durations = []
+        with patch("yfinance.download", return_value=pd.DataFrame()) as mock_dl, \
+             patch("time.sleep", side_effect=sleep_durations.append), \
+             patch("src.data.data_sources._fetch_alpha_vantage_backup", return_value=ds.normalize_av_df(_dummy_av_raw_df(), "AAPL")), \
+             patch("src.alerts.email_alerts.send_failover_alert"), \
+             patch("src.alerts.telegram_alerts.notify_failover"):
+            df = ds.fetch_with_fallback("AAPL", max_retries=3, retry_wait_sec=5.0, save_raw=False)
+
+        assert not df.empty
+        assert mock_dl.call_count == 3
+        assert len(sleep_durations) == 2
+        assert sleep_durations == [5.0, 5.0]
+
+    def test_yfinance_validation_still_runs_on_returned_data(self):
+        """Verify validation and normalization still run on returned data and no stale data is used."""
+        raw_df = _dummy_raw_df()
+        with patch("src.data.data_sources._fetch_yfinance_primary", return_value=raw_df):
+            df = ds.fetch_with_fallback("AAPL", save_raw=False)
+
+        assert not df.empty
+        assert list(df.columns) == ["date", "open", "high", "low", "close", "volume", "ticker"]
+        assert df["ticker"].iloc[0] == "AAPL"
+
 
 # ── 2. Backup Source Tests (Alpha Vantage) ────────────────────────────────────
 

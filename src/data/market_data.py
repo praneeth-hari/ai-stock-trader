@@ -145,6 +145,7 @@ def fetch_ticker_data(
     pull_date: Optional[str] = None,
     max_retries: Optional[int] = None,
     retry_wait_sec: Optional[float] = None,
+    timeout_sec: Optional[float] = None,
 ) -> pd.DataFrame:
     """
     Fetch OHLCV data for a single US ticker using multi-provider fallback
@@ -160,6 +161,7 @@ def fetch_ticker_data(
         pull_date=pull_date,
         max_retries=max_retries,
         retry_wait_sec=retry_wait_sec,
+        timeout_sec=timeout_sec,
     )
 
 

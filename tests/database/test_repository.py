@@ -116,6 +116,193 @@ class TestMarketData:
         inserted = repo.save_market_data(pd.DataFrame())
         assert inserted == 0
 
+    def test_batch_save_market_data_496_rows_four_new(self, caplog):
+        """
+        Verify saving ~496 rows with only 4 new rows:
+        - DB has 492 existing rows.
+        - Incoming df has 496 rows (492 existing + 4 new).
+        - Existing keys are fetched in a batched lookup (bounded number of queries, not one SELECT per row).
+        - Only 4 new rows are inserted.
+        - Existing rows are not modified.
+        - Insert-count logging semantics are preserved.
+        - Repeated calls remain idempotent.
+        """
+        import logging
+        from sqlalchemy import event
+
+        repo = _repo()
+        # Seed 492 rows
+        dates_492 = [f"2024-{i // 25 + 1:02d}-{i % 25 + 1:02d}" for i in range(492)]
+        seed_df = pd.DataFrame([
+            {
+                "date": d,
+                "ticker": "SPY",
+                "open": 400.0,
+                "high": 405.0,
+                "low": 399.0,
+                "close": 402.0 + idx * 0.01,
+                "volume": 50_000_000.0,
+            }
+            for idx, d in enumerate(dates_492)
+        ])
+        inserted_seed = repo.save_market_data(seed_df)
+        assert inserted_seed == 492
+        assert len(repo.get_market_data("SPY")) == 492
+
+        # 4 new dates
+        dates_4_new = ["2025-12-01", "2025-12-02", "2025-12-03", "2025-12-04"]
+        # Incoming DataFrame has all 496 rows (with altered close to check existing rows are not modified)
+        incoming_rows = [
+            {
+                "date": d,
+                "ticker": "SPY",
+                "open": 400.0,
+                "high": 405.0,
+                "low": 399.0,
+                "close": 999.0,  # Try to overwrite existing - must NOT be modified
+                "volume": 50_000_000.0,
+            }
+            for d in dates_492
+        ] + [
+            {
+                "date": d,
+                "ticker": "SPY",
+                "open": 500.0,
+                "high": 505.0,
+                "low": 499.0,
+                "close": 502.0,
+                "volume": 60_000_000.0,
+            }
+            for d in dates_4_new
+        ]
+        incoming_df = pd.DataFrame(incoming_rows)
+        assert len(incoming_df) == 496
+
+        # Count SELECT queries executed during save_market_data
+        select_queries = []
+        engine = repo.get_engine()
+
+        def on_execute(conn, cursor, statement, parameters, context, executemany):
+            stmt_upper = statement.strip().upper()
+            if stmt_upper.startswith("SELECT"):
+                select_queries.append(statement)
+
+        event.listen(engine, "before_cursor_execute", on_execute)
+        try:
+            with caplog.at_level(logging.INFO):
+                inserted = repo.save_market_data(incoming_df)
+        finally:
+            event.remove(engine, "before_cursor_execute", on_execute)
+
+        # 1. Exactly 4 genuinely new rows inserted
+        assert inserted == 4
+        assert len(repo.get_market_data("SPY")) == 496
+
+        # 2. Existing keys fetched in a batched lookup (exactly 1 SELECT query, NOT 496 SELECTs)
+        assert len(select_queries) == 1
+        assert "WHERE market_data.ticker =" in select_queries[0]
+        assert "market_data.date IN" in select_queries[0]
+
+        # 3. Existing rows were not modified (close remains 402.0, not overwritten with 999.0)
+        first_row = repo.get_market_data("SPY", start_date="2024-01-01", end_date="2024-01-01")
+        assert len(first_row) == 1
+        assert first_row["close"].iloc[0] == 402.0
+
+        # 4. Insert-count logging semantics preserved
+        assert "save_market_data: inserted 4 rows (skipped existing)." in caplog.text
+
+        # 5. Repeated calls remain idempotent
+        second_run = repo.save_market_data(incoming_df)
+        assert second_run == 0
+        assert len(repo.get_market_data("SPY")) == 496
+
+    def test_duplicate_input_keys_handled_safely(self):
+        """Input DataFrame containing duplicate (date, ticker) keys is handled safely and preserves first occurrence."""
+        repo = _repo()
+        dup_df = pd.DataFrame([
+            {"date": "2024-01-02", "ticker": "NVDA", "open": 450.0, "high": 460.0, "low": 445.0, "close": 455.0, "volume": 10_000_000},
+            {"date": "2024-01-02", "ticker": "NVDA", "open": 450.0, "high": 460.0, "low": 445.0, "close": 490.0, "volume": 10_000_000},  # duplicate key
+            {"date": "2024-01-03", "ticker": "NVDA", "open": 455.0, "high": 465.0, "low": 450.0, "close": 460.0, "volume": 12_000_000},
+            {"date": "2024-01-02", "ticker": "NVDA", "open": 450.0, "high": 460.0, "low": 445.0, "close": 499.0, "volume": 10_000_000},  # duplicate key
+        ])
+        inserted = repo.save_market_data(dup_df)
+        assert inserted == 2  # Only the 2 distinct date keys
+        out = repo.get_market_data("NVDA")
+        assert len(out) == 2
+        # First occurrence was preserved
+        day1 = out[out["date"] == "2024-01-02"]
+        assert day1["close"].iloc[0] == 455.0
+
+    def test_large_input_batching_safe_for_sqlite_parameter_limits(self):
+        """
+        Verify that inputs exceeding the 499 chunk size (e.g. 1,200 rows across multiple tickers)
+        are safely batched without exceeding SQLite's 999 bound-parameter limit,
+        and that existing-key lookups accurately distinguish existing from new rows.
+        """
+        from sqlalchemy import event
+
+        repo = _repo()
+        # 1,200 rows across 2 tickers: AAPL and MSFT (600 each)
+        tickers = ["AAPL", "MSFT"]
+        all_rows = []
+        seed_rows = []
+        for t in tickers:
+            for i in range(600):
+                d = f"2020-{i // 28 + 1:02d}-{i % 28 + 1:02d}"
+                row_dict = {
+                    "date": d,
+                    "ticker": t,
+                    "open": 100.0 + i,
+                    "high": 105.0 + i,
+                    "low": 99.0 + i,
+                    "close": 102.0 + i,
+                    "volume": 1_000_000.0,
+                }
+                all_rows.append(row_dict)
+                # Seed first 300 per ticker (600 total seeded)
+                if i < 300:
+                    seed_rows.append(row_dict)
+
+        seed_df = pd.DataFrame(seed_rows)
+        inserted_seed = repo.save_market_data(seed_df)
+        assert inserted_seed == 600
+
+        # Now save all 1,200 rows (600 existing + 600 new)
+        full_df = pd.DataFrame(all_rows)
+        assert len(full_df) == 1200
+
+        engine = repo.get_engine()
+        select_queries = []
+
+        def on_execute(conn, cursor, statement, parameters, context, executemany):
+            stmt_upper = statement.strip().upper()
+            if stmt_upper.startswith("SELECT"):
+                select_queries.append((statement, parameters))
+
+        event.listen(engine, "before_cursor_execute", on_execute)
+        try:
+            inserted = repo.save_market_data(full_df)
+        finally:
+            event.remove(engine, "before_cursor_execute", on_execute)
+
+        # Exactly 600 genuinely new rows inserted
+        assert inserted == 600
+        # Check select queries were chunked into ceil(1200 / 499) = 3 batched queries
+        assert len(select_queries) == 3
+        for stmt, params in select_queries:
+            # Bound parameters must never exceed SQLite's 999 limit
+            if isinstance(params, (list, tuple)):
+                assert len(params) <= 998
+            elif isinstance(params, dict):
+                assert len(params) <= 998
+
+        # Total rows in DB is 1,200
+        assert len(repo.get_market_data("AAPL")) == 600
+        assert len(repo.get_market_data("MSFT")) == 600
+
+        # Repeated call remains idempotent
+        assert repo.save_market_data(full_df) == 0
+
 
 # ── Features ──────────────────────────────────────────────────────────────────
 

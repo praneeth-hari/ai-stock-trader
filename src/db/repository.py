@@ -56,7 +56,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, select, tuple_
 from sqlalchemy.orm import Session
 
 from config.settings import settings
@@ -358,29 +358,71 @@ def save_market_data(df: pd.DataFrame) -> int:
     if missing:
         raise ValueError(f"save_market_data: DataFrame missing columns {missing}")
 
+    # Deduplicate within input in memory, preserving first occurrence and normalizing keys
+    seen_input_keys: set[tuple[str, str]] = set()
+    candidate_rows: list[dict[str, Any]] = []
+    unique_tickers: set[str] = set()
+    dates_by_ticker: dict[str, set[str]] = {}
+
+    for _, row in df.iterrows():
+        raw_date = row["date"]
+        d_str = raw_date.strftime("%Y-%m-%d") if hasattr(raw_date, "strftime") else str(raw_date)
+        t_str = str(row["ticker"])
+        key = (d_str, t_str)
+        if key in seen_input_keys:
+            continue
+        seen_input_keys.add(key)
+        candidate_rows.append({
+            "date": d_str,
+            "ticker": t_str,
+            "open": float(row["open"]),
+            "high": float(row["high"]),
+            "low": float(row["low"]),
+            "close": float(row["close"]),
+            "volume": float(row["volume"]),
+            "data_as_of": str(row["data_as_of"]) if ("data_as_of" in row and pd.notna(row["data_as_of"])) else datetime.now(timezone.utc).isoformat(),
+        })
+        unique_tickers.add(t_str)
+        dates_by_ticker.setdefault(t_str, set()).add(d_str)
+
+    if not candidate_rows:
+        logger.info("save_market_data: inserted 0 rows (skipped existing).")
+        return 0
+
     inserted = 0
     with Session(get_engine()) as session:
-        for _, row in df.iterrows():
-            # Check for existing row to avoid unique-constraint errors.
-            existing = session.execute(
-                select(MarketDataRow).where(
-                    MarketDataRow.date == row["date"],
-                    MarketDataRow.ticker == row["ticker"],
-                )
-            ).scalar_one_or_none()
+        existing_keys: set[tuple[str, str]] = set()
 
-            if existing is None:
-                session.add(MarketDataRow(
-                    date=str(row["date"]),
-                    ticker=str(row["ticker"]),
-                    open=float(row["open"]),
-                    high=float(row["high"]),
-                    low=float(row["low"]),
-                    close=float(row["close"]),
-                    volume=float(row["volume"]),
-                    data_as_of=str(row["data_as_of"]) if ("data_as_of" in row and pd.notna(row["data_as_of"])) else datetime.now(timezone.utc).isoformat(),
-                ))
-                inserted += 1
+        if len(unique_tickers) == 1:
+            ticker = next(iter(unique_tickers))
+            all_dates = list(dates_by_ticker[ticker])
+            for i in range(0, len(all_dates), 499):
+                chunk = all_dates[i : i + 499]
+                stmt = select(MarketDataRow.date, MarketDataRow.ticker).where(
+                    MarketDataRow.ticker == ticker,
+                    MarketDataRow.date.in_(chunk),
+                )
+                for r_date, r_ticker in session.execute(stmt).all():
+                    existing_keys.add((str(r_date), str(r_ticker)))
+        else:
+            all_pairs = list(seen_input_keys)
+            for i in range(0, len(all_pairs), 499):
+                chunk = all_pairs[i : i + 499]
+                stmt = select(MarketDataRow.date, MarketDataRow.ticker).where(
+                    tuple_(MarketDataRow.date, MarketDataRow.ticker).in_(chunk)
+                )
+                for r_date, r_ticker in session.execute(stmt).all():
+                    existing_keys.add((str(r_date), str(r_ticker)))
+
+        new_objects = [
+            MarketDataRow(**row_dict)
+            for row_dict in candidate_rows
+            if (row_dict["date"], row_dict["ticker"]) not in existing_keys
+        ]
+
+        if new_objects:
+            session.add_all(new_objects)
+            inserted = len(new_objects)
 
         session.commit()
 

@@ -289,9 +289,14 @@ class Settings(BaseSettings):
         description="Maximum retry attempts on market data fetch failure.",
     )
     data_fetch_retry_wait_sec: float = Field(
-        default=60.0,
+        default=5.0,
         ge=0,
         description="Wait time in seconds between fetch retries.",
+    )
+    data_fetch_timeout_sec: float = Field(
+        default=30.0,
+        gt=0,
+        description="Timeout in seconds for market data network requests (e.g. yfinance).",
     )
 
     # ── Dynamic Rejection Thresholds (§1.7) ───────────────────────────────────

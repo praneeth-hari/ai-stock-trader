@@ -149,9 +149,15 @@ def _fetch_yfinance_primary(
     period: Optional[str] = None,
     max_retries: int = 2,
     wait_sec: float = 1.0,
+    timeout_sec: Optional[float] = None,
 ) -> pd.DataFrame:
     """Fetch raw data from yfinance (primary source)."""
-    kwargs: dict = dict(tickers=ticker, auto_adjust=False, progress=False)
+    timeout = (
+        timeout_sec
+        if timeout_sec is not None
+        else getattr(settings, "data_fetch_timeout_sec", 30.0)
+    )
+    kwargs: dict = dict(tickers=ticker, auto_adjust=False, progress=False, timeout=timeout)
     if start_date and end_date:
         warmup_calendar_days = int(settings.warmup_bars * 365 / 252) + 15
         extended_start = (
@@ -167,7 +173,7 @@ def _fetch_yfinance_primary(
     for attempt in range(1, max_retries + 1):
         try:
             raw_df = yf.download(**kwargs)
-            if not raw_df.empty:
+            if raw_df is not None and not raw_df.empty:
                 return raw_df
         except Exception as exc:
             logger.warning("yfinance fetch error for %s (attempt %d/%d): %s", ticker, attempt, max_retries, exc)
@@ -267,6 +273,7 @@ def fetch_with_fallback(
     pull_date: Optional[str] = None,
     max_retries: Optional[int] = None,
     retry_wait_sec: Optional[float] = None,
+    timeout_sec: Optional[float] = None,
 ) -> pd.DataFrame:
     """
     Fetch OHLCV data using multi-provider fallback strategy:
@@ -282,6 +289,7 @@ def fetch_with_fallback(
     clean_ticker = ticker.strip().upper()
     retries = max_retries if max_retries is not None else settings.data_fetch_max_retries
     wait_sec = retry_wait_sec if retry_wait_sec is not None else settings.data_fetch_retry_wait_sec
+    timeout = timeout_sec if timeout_sec is not None else getattr(settings, "data_fetch_timeout_sec", 30.0)
 
     # ── 1. Try Primary Source: yfinance ───────────────────────────────────────
     logger.info("Trying Primary Data Source (yfinance) for %s...", clean_ticker)
@@ -292,6 +300,7 @@ def fetch_with_fallback(
         period=period,
         max_retries=retries,
         wait_sec=wait_sec,
+        timeout_sec=timeout,
     )
 
     if not yf_raw.empty:
