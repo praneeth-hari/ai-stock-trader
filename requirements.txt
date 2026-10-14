@@ -36,6 +36,7 @@ psycopg2-binary>=2.9.9    # PostgreSQL driver (Cloud Supabase)
 
 # ── Dashboard ─────────────────────────────────────────────────────────────────
 streamlit>=1.40.0
+plotly>=5.20.0
 
 # ── Scheduling ────────────────────────────────────────────────────────────────
 apscheduler>=3.10.4
